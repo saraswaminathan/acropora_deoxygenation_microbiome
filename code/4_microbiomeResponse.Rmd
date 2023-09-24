@@ -1,0 +1,1303 @@
+---
+title: "4_microbiomeResponse"
+author: "Sara Devi Swaminathan"
+date: "`r Sys.Date()`"
+output: html_document
+toc: true
+toc_float: true
+number_sections: true
+---
+# Table of Contents {#table-of-contents}
+
+## Setup: working directory and packages
+
+Load libraries and set working directory
+
+```{r, setup}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("phyloseq")
+# BiocManager::install("ALDEx2")
+# devtools::install_github('ggloor/CoDaSeq/CoDaSeq')
+#install.packages("microbiome")
+#BiocManager::install("microbiome")
+#BiocManager::install("ANCOMBC")
+
+library(tidyverse)
+library(phyloseq)
+library(vegan)
+library(ALDEx2)
+library(CoDaSeq)
+library(zCompositions)
+library(plyr)
+library(parallel)
+library(brms)
+library(data.table)
+library(microbiome)
+library(microbiomeutilities)
+library(bayestestR)
+library(coda.base)
+library(randomcoloR)
+#devtools::install_github("gmteunisse/fantaxtic")
+library(fantaxtic)
+library(lme4)
+#BiocManager::install("ANCOMBC")
+library(ANCOMBC)
+#writeLines(capture.output(sessionInfo()), "sessionInfo.txt")
+#remotes::install_github("cpauvert/psadd")
+library(psadd)
+library(viridis)
+
+
+
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+```
+
+- Dada2 is run in "3_DADA2.R"
+
+## Create initial phyloseq object
+
+```{r include=FALSE}
+
+otu_initial <- fread("data/dada2_silva_otu_table.txt",sep="\t",header=TRUE)%>%
+  column_to_rownames("V1")%>%
+  as.matrix()#read in OTU table, this was originally called "seqtab.nochim" in the dada pipeline
+
+taxon_initial <- as.matrix(read.table("data/dada2_silva_taxa_table.txt",sep="\t",header=TRUE,row.names=1)) #read in taxon table as matrix
+
+metaWorking<-readr::read_csv("data/metadata.csv") #read in metadata file with photophysiology information included
+
+metaWorking<-metaWorking%>%
+  column_to_rownames("SampleAndRun")
+
+OTU = otu_table(otu_initial, taxa_are_rows=FALSE) #create phyloseq's otu_table-class object
+
+TAX_initial = tax_table(taxon_initial) #convert matrix to phyloseq's taxonomyTable-class
+
+sampledata = sample_data(metaWorking) #convert metadata to phyloseq's sample_data-class
+
+#make initial phyloseq object 
+ps_initial <- phyloseq(otu_table(otu_initial, taxa_are_rows=FALSE),
+               sample_data(sampledata), 
+               tax_table(taxon_initial))
+ps_initial
+# [ 5461 taxa and 75 samples ]
+sequences <- Biostrings::DNAStringSet(taxa_names(ps_initial))
+names(sequences) <- taxa_names(ps_initial)
+ps_initial <- merge_phyloseq(ps_initial, sequences)
+
+```
+
+ Remove chloroplasts, mitochondria, and eukaryota
+
+```{r}
+# Filtering taxa with phyloseq package
+get_taxa_unique(ps_initial, "Family") #659
+get_taxa_unique(ps_initial, "Order") #378
+get_taxa_unique(ps_initial, "Kingdom") #4
+ps2 <- subset_taxa(ps_initial, Family !="Mitochondria") #remove Mitochondria
+ps2 <- subset_taxa(ps2, Order !="Chloroplast") #remove Chloroplasts
+ps2 <- subset_taxa(ps2, Kingdom !="Eukaryota") #remove Eukaryota
+ps2 <- subset_taxa(ps2, Kingdom !="NA") #remove Kingom = NAs
+get_taxa_unique(ps2, "Family") #655
+get_taxa_unique(ps2, "Order") #374
+get_taxa_unique(ps2, "Kingdom") #2
+```
+
+ Export otu, taxa, and metadata from no-chloro-no-mito phyloseq 
+
+```{r}
+#Export cleaned otu and taxa tables from phyloseq
+otu = as(otu_table(ps2), "matrix") #convert otu table back to matrix
+taxon = as(tax_table(ps2), "matrix") #convert taxon table back to matrix
+metadata = as(sample_data(ps2), "matrix") #convert metadata table to matrix
+write.table(otu,"data/silva_nochloronomito_otu_table.txt",sep="\t",col.names=NA)   
+write.table(taxon,"data/silva_nochloronomito_taxa_table.txt",sep="\t",col.names=NA) 
+
+```
+
+ Re-import after clearing environment and lock environment
+
+```{r Read in data after clear}
+#### CLEAR DATA and read back in cleaned data (no NAs, no chloroplasts, no mitochondria, no eukaryotes)
+#below objects should be only ones you need going forward, and have plain names
+otu<- fread("data/silva_nochloronomito_otu_table.txt",sep="\t",header=TRUE) %>%
+  dplyr::rename(SampleAndRun = V1)
+names(otu)
+taxon<- read.table("data/silva_nochloronomito_taxa_table.txt",sep="\t",header=TRUE,row.names=1) #read in filtered taxa table
+meta<-read_csv("data/metadata.csv")%>% #read in sample
+  mutate(trtNumeric = as.numeric(treatment))
+
+sampleAndRun<-meta%>%
+  dplyr::select(SampleAndRun, SampleID)
+
+otu<-otu%>%
+  left_join(sampleAndRun, by = "SampleAndRun")%>%
+  dplyr::select(-SampleAndRun)%>%
+  column_to_rownames("SampleID")
+  
+samples<-meta%>%
+  column_to_rownames('SampleID') #read in metadata
+
+otu<-as.matrix(otu)
+class(otu)<-"numeric"
+
+
+OTU = otu_table(as.matrix(otu), taxa_are_rows=FALSE) #convert to phyloseq's otu_table-class object
+taxon<-as.matrix(taxon) #convert taxon to matrix
+TAX = tax_table(taxon) #convert matrix to phyloseq's taxonomyTable-class
+sampledata = sample_data(samples) #convert dataframe to phyloseq's sample_data-class
+
+ps2 <- phyloseq(otu_table(otu, taxa_are_rows = FALSE), 
+               sample_data(samples), 
+               tax_table(taxon)) #create filtered phyloseq. 
+
+#ID taxa names with number IDs
+tax_table(ps2) <- cbind(tax_table(ps2),rownames(tax_table(ps2)))
+sequences2 <- Biostrings::DNAStringSet(taxa_names(ps2))
+taxa_names(ps2) <- paste0("ASV", seq(ntaxa(ps2)))
+tax_table(ps2) <- cbind(tax_table(ps2),rownames(tax_table(ps2)))
+head(taxa_names(ps2))
+names(sequences2) <- taxa_names(ps2)
+summarize_phyloseq(ps2)
+
+ps2 <- merge_phyloseq(ps2, sequences2) #add sequences to phyloseq object
+colnames(tax_table(ps2))
+
+colnames(tax_table(ps2)) <- c("Kingdom", "Phylum", "Class", "Order","Family", "Genus", "ASV_SEQ", "ASV_ID")
+
+write.table(tax_table(ps2),
+            "data/full_tax_table.txt",
+            sep="\t", quote = FALSE, col.names=NA)
+write.table(t(otu_table(ps2)),
+            "data/full_seq_table.txt",
+           sep="\t", quote = FALSE, col.names=NA)
+
+# Create fasta file from tax_table
+table2format <- tax_table(ps2)
+#retain only the column with the sequences
+table2format_trim <- table2format[, 7]
+table2format_trim_df <- data.frame(row.names(table2format_trim),
+                                   table2format_trim)
+colnames(table2format_trim_df) <- c("ASV_ID", "ASV_SEQ")
+#format fasta
+table2format_trim_df$ASV_ID <- sub("ASV", ">ASV", table2format_trim_df$ASV_ID)
+
+write.table(table2format_trim_df, "data/full_asv.fasta",
+            sep = "\r", col.names = FALSE, row.names = FALSE,
+            quote = FALSE, fileEncoding = "UTF-8")
+
+```
+
+rename NAs in tax table
+
+```{r}
+tax.clean <- data.frame(tax_table(ps2))
+for (i in 1:6){ tax.clean[,i] <- as.character(tax.clean[,i])}
+tax.clean[is.na(tax.clean)] <- ""
+for (i in 1:nrow(tax.clean)){
+    if (tax.clean[i,2] == ""){
+        kingdom <- paste("Kingdom_", tax.clean[i,1], sep = "")
+        tax.clean[i, 2:6] <- kingdom
+    } else if (tax.clean[i,3] == ""){
+        phylum <- paste("Phylum_", tax.clean[i,2], sep = "")
+        tax.clean[i, 3:6] <- phylum
+    } else if (tax.clean[i,4] == ""){
+        class <- paste("Class_", tax.clean[i,3], sep = "")
+        tax.clean[i, 4:6] <- class
+    } else if (tax.clean[i,5] == ""){
+        order <- paste("Order_", tax.clean[i,4], sep = "")
+        tax.clean[i, 5:6] <- order
+    } else if (tax.clean[i,6] == ""){
+        tax.clean$Genus[i] <- paste("Family",tax.clean$Family[i], sep = "_")
+        }
+}
+tax_table(ps2) <- as.matrix(tax.clean)
+rank_names(ps2)
+
+```
+
+ Subset phyloseqs
+
+```{r}
+#Filter low abundance for phyloseq
+ntaxa(ps2) #5082
+sample_data(ps2)
+ps2 = subset_samples(ps2, !Sample=="BLANK") #remove blank
+summarize_phyloseq(ps2) # 6789 singletons (7%), 0.96 sparsity
+plot_sparsity(ps2, title = NULL)
+
+#########################REMOVE SINGLETONS AND DOUBLETONS
+test_function <- function(x) { x > 2 }
+taxa.to.keep <- genefilter_sample(ps2, test_function, A = 1) # a sample-wise filter that will filter out single and doubletons
+ps2Pruned<-prune_taxa(taxa.to.keep, ps2) 
+ps2Pruned ##4805 taxa remain
+summarize_phyloseq(ps2Pruned)
+
+# ##### standard prevalence filtering
+# ps5<-filter_taxa(ps2, function(x) mean(x) >5, TRUE)
+# ntaxa(ps5) #529
+# summarize_phyloseq(ps5) #sparsity 0.5
+# get_taxa_unique(ps2, "Genus") # 1416
+# get_taxa_unique(ps5, "Genus") #207
+
+########################## prevalence filtered phyloseq
+total.depth <- sum(otu_table(ps2Pruned)) # calculate total number of reads #3826398
+threshold <- 1e-5 * total.depth   # calculate .00001 * total number of reads
+ps2Rare <- prune_taxa(taxa_sums(ps2Pruned) > threshold, ps2Pruned) # remove taxa that don't constitute .001% of reads
+ps2Rare  ##2366 taxa remain
+summarize_phyloseq(ps2Rare) #sparsity = 0.82
+
+############################# Make relative abundance phyloseq from psRare
+psRa<-transform_sample_counts(ps2Rare, function(OTU) OTU/sum(OTU)) #create relative abundance ps
+otuRA = as(otu_table(psRa), "matrix") #get rel. abund. otu table
+taxonRA = as(tax_table(psRa), "matrix") #get rel. abund. taxonomic table
+metadataRA = as(sample_data(psRa), "matrix") # get rel. abund. metadata
+sample_sums(psRa)[1:5] #should all be 1
+
+# ############################# Make relative abundance phyloseq from ps without singletons/doubletons
+# psRaConservative<-transform_sample_counts(ps2Pruned, function(OTU) OTU/sum(OTU)) #create relative abundance ps
+# otuRACons = as(otu_table(psRaConservative), "matrix") #get rel. abund. otu table
+# taxonRACons = as(tax_table(psRaConservative), "matrix") #get rel. abund. taxonomic table
+# metadataRACons = as(sample_data(psRaConservative), "matrix") # get rel. abund. metadata
+# sample_sums(psRaConservative)[1:5] #should all be 1
+
+```
+
+
+##  Data visualization setup
+- Make custom theme for all plots
+
+```{r}
+mytheme <- theme_classic() + 
+  theme(text = element_text(size=15)) +
+  theme(axis.text.x = element_text(size=15,colour="black"), 
+        axis.text.y =   element_text(size=15,colour="black")) +
+  theme(plot.margin = unit(c(5.5,5.5,5.5,15), "pt")) +
+  theme(panel.border = element_rect(colour = "black", 
+                                    fill=NA,size=1)) +
+  theme(axis.line = element_line(size = 0))
+
+### Set color palette 
+#plot.col.treat<-c("0.5" = "#AD0606", "2" = "#CA8F08", "4" =  "#A4CE30", "6" =  "#A9E0A3")
+plot.col.treat<-c("0" = "#F18D34", "2" = "#F5C75D", "4" =  "#E5EF99", "6" =  "#A5DEDE")
+```
+
+## alpha diversity 
+
+### alpha diversity plot
+
+```{r}
+
+#################### ALPHA DIVERSITY ANALYSIS WITH PRUNED DATA
+### Get total number of reads in ps2Pruned
+total_reads <- sample_sums(ps2Rare) %>%
+      as.data.frame(make.names = TRUE)%>% 
+      rownames_to_column("SampleID") %>%
+  dplyr::rename(total_reads = '.')
+
+### Summarize diversity across samples
+total_asvs <- estimate_richness(ps2Rare, measures = c("Observed", "Shannon")) %>% rownames_to_column("SampleID")
+total_asvs$SampleID <- gsub('X', '', total_asvs$SampleID)
+
+sam_details <- meta(sample_data(ps2Rare)) %>%
+  rownames_to_column("SampleID")%>%
+  mutate(treatment = ifelse(is.na(treatment), origin_site, treatment))
+
+merge_tab <- merge(sam_details, total_reads, by = "SampleID")
+
+merge_tab2 <- merge(merge_tab, total_asvs, by = "SampleID")%>%
+  dplyr::select(c(SampleID, treatment, origin_site,tank, genotype, total_reads, Observed, Shannon))%>%
+  filter(!SampleID=="B")%>%
+  mutate(treatment = factor(treatment, levels = c("6", "4", "2", "0")))%>%
+  # mutate(site = ifelse(origin_site=="MUN", "inshore",
+  #                      ifelse(origin_site=="NUR", "offshore", "ERROR")))%>%
+  mutate_if(is.character, as.factor)
+
+
+
+###################################################### ALPHA DIVERSITY PLOTS
+(shannonPlot <- merge_tab2%>%
+  filter(!is.na(tank))%>%
+  mutate(treatment = factor(treatment, levels = c("0", "2", "4", "6")))%>%
+  ggplot(aes(x = treatment, y = Shannon, fill = treatment)) + 
+  geom_boxplot(alpha = 0.5) + 
+  geom_jitter(aes(color = treatment), width = 0.2, alpha = 0.8)+
+  scale_fill_manual(values = plot.col.treat)+
+  scale_color_manual(values =plot.col.treat)+
+  mytheme)
+ggsave(file = "fig/shannonPlot.svg", plot = shannonPlot, width = 7, height = 5)
+
+
+################ make treatment numeric for analysis
+merge_tab2 <- merge_tab2%>%
+  mutate(trtNumeric = as.numeric(ifelse(treatment == "0", 0, 
+                             ifelse(treatment == "2", 2,
+                                    ifelse(treatment == "4", 4,
+                                           ifelse(treatment == "6", 6, treatment))))))
+
+```
+
+### alpha diversity models
+
+ First, set instructions for sampler
+
+```{r}
+n_cores <- detectCores() # this will determine how many cores your computer has so that it can use all of its processing power
+n_chains <- 2 
+n_iter <- 4000
+n_warmup <- 2000
+```
+
+ Shannon index bayesian model
+
+ fixed effects:  treatment, site,treatment*site,  re: tank, genotype
+```{r}
+hist(merge_tab2$Shannon) #use gaussian distrib.
+#define model
+shannon_mod <- bf(Shannon ~ 1  + trtNumeric  + origin_site + trtNumeric:origin_site + (1|tank) + (1|genotype),
+              family =  gaussian())
+
+##### Get priors
+
+get_prior(shannon_mod, data = merge_tab2) 
+
+##### Set priors
+table(merge_tab2$genotype)
+mean(merge_tab2$Shannon[merge_tab2$genotype=="31"]) #3.9
+
+    
+shan_prior <- c(prior(normal(3.9, 1), class = "Intercept"),
+               prior(normal(0, 1), class = "b"),
+               prior(exponential(1), class = "sd"))
+                          
+# shan_brm <- brm(shannon_mod,
+#                data = merge_tab2,
+#                prior = shan_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+
+# pp_check(shan_brm, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(shan_brm, type = "dens_overlay", ndraws = 100)
+# 
+# bayes_R2(shan_brm) #.41
+# shan_brm
+# 
+# describe_posterior(shan_brm)
+```
+
+ fixed effects:  treatment, site, re: tank, genotype
+```{r}
+#define model
+shannon_mod2 <- bf(Shannon ~ 1  + trtNumeric  + origin_site + (1|tank) + (1|genotype),
+              family =  gaussian())
+
+# shan_brm2 <- brm(shannon_mod2,
+#                data = merge_tab2,
+#                prior = shan_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(shan_brm2, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(shan_brm2, type = "dens_overlay", ndraws = 100)
+# model_weights(shan_brm2, shan_brm) #BETTER WITHOUT INTERACTION
+# bayes_R2(shan_brm) #.41
+# shan_brm
+# 
+# describe_posterior(shan_brm)
+```
+
+ fixed effects:  treatment, site, re:  genotype
+```{r}
+#define model
+shannon_mod3 <- bf(Shannon ~ 1  + trtNumeric  + origin_site  + (1|genotype),
+              family =  gaussian())
+
+# shan_brm3 <- brm(shannon_mod3,
+#                data = merge_tab2,
+#                prior = shan_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(shan_brm3, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(shan_brm3, type = "dens_overlay", ndraws = 100)
+# model_weights(shan_brm, shan_brm3) #BETTER WITH TANK
+# bayes_R2(shan_brm3)  #0.04
+# shan_brm3
+# 
+# describe_posterior(shan_brm3)
+```
+
+
+ fixed effects:  treatment, site re:  tank
+```{r}
+#define model
+shannon_mod4 <- bf(Shannon ~ 1  + trtNumeric  + origin_site +  (1|tank),
+              family =  gaussian())
+
+##### Get priors
+
+get_prior(shannon_mod, data = merge_tab2) 
+
+##### Set priors
+table(merge_tab2$origin_site)
+mean(merge_tab2$Shannon[merge_tab2$origin_site=="MUN"]) #3.9, so keep priors the same
+
+                          
+# shan_brm4 <- brm(shannon_mod4,
+#                data = merge_tab2,
+#                prior = shan_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(shan_brm4, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(shan_brm4, type = "dens_overlay", ndraws = 100)
+# model_weights(shan_brm2, shan_brm4) #BETTER WITHout genotype
+# bayes_R2(shan_brm4)  #0.4
+# shan_brm4
+# 
+# describe_posterior(shan_brm4)
+```
+
+ fixed effects:  treatment, site re:  1+ treatment|tank
+```{r}
+#define model
+shannon_mod5 <- bf(Shannon ~ 1  + trtNumeric  + origin_site +  (1+trtNumeric|tank),
+              family =  gaussian())
+                          
+# shan_brm5 <- brm(shannon_mod5,
+#                data = merge_tab2,
+#                prior = shan_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(shan_brm5, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(shan_brm5, type = "dens_overlay", ndraws = 100)
+# model_weights(shan_brm5, shan_brm4) #BETTER with diff slopes by tank
+# bayes_R2(shan_brm5)  #0.4
+# shan_brm5
+# 
+# describe_posterior(shan_brm5)
+```
+
+#### Best model of shannon index
+- fixed effects:  treatment re:  1+ treatment|tank
+
+```{r}
+#define model
+shannon_mod6 <- bf(Shannon ~ 1  + trtNumeric  + (1+trtNumeric|tank),
+              family =  gaussian())
+
+##### Get priors
+
+##### Set priors
+table(merge_tab2$tank)
+mean(merge_tab2$Shannon[merge_tab2$tank=="1"]) #4
+
+    
+shan_prior <- c(prior(normal(4, 1), class = "Intercept"),
+               prior(normal(0, 1), class = "b"),
+               prior(exponential(1), class = "sd"))
+                          
+shan_brm6 <- brm(shannon_mod6,
+               data = merge_tab2,
+               prior = shan_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               warmup = n_warmup)
+
+saveRDS(shan_brm6, "model outputs/shan_brm.RDS")
+shan_brm6 <- readRDS("model outputs/shan_brm.RDS")
+pp_check(shan_brm6, type = "loo_pit_overlay", ndraws = 100)
+pp_check(shan_brm6, type = "dens_overlay", ndraws = 100)
+#model_weights(shan_brm5, shan_brm6) #BETTER WITHOUT SITE
+bayes_R2(shan_brm6)  #0.41
+shan_brm6
+
+describe_posterior(shan_brm6, ci = 0.95) #crosses 0
+describe_posterior(shan_brm6, ci = 0.65) #crosses 0
+```
+
+### Aitchison distance and principal components calculations 
+
+```{r}
+######### Perform center-log-ratio transformation on ASVs and calculate Aitchison Distance and principal components
+
+otuAcer2 <- as(otu_table(ps2Rare), "matrix") #convert otu table back to matrix
+
+# First, replace 0 values with an estimate (because normalization is taking log, can't have 0)
+# Also transposing here, need samples as rows
+d.czmAcer2 <- cmultRepl(t(otuAcer2), method="CZM", label=0, z.warning = 0.95) # No. adjusted imputations:  141607 
+
+# Perform the center-log-ratio (CLR) transformation
+d.clrAcer2 <- codaSeq.clr(d.czmAcer2)
+
+# transpose matrix of CLR transformed data for ordination and dendrogram
+E.clrAcer2 <- t(d.clrAcer2)
+
+#Aitchison distance
+dist.clrAcer2 <- coda.base::dist(E.clrAcer2)
+
+# plot compositional PCA biplot (perform a singular value decomposition)
+d.pcx <- prcomp(E.clrAcer2) 
+# calculate percent variance explained for the axis labels
+pc1 <- round(d.pcx$sdev[1]^2/sum(d.pcx$sdev^2),2)
+pc2 <- round(d.pcx$sdev[2]^2/sum(d.pcx$sdev^2),2)
+xlab <- paste("PC1: ", pc1, sep="")
+ylab <- paste("PC2: ", pc2, sep="")
+#biplot(d.pcx, cex=c(0.6,0.4), var.axes=F,scale=1, xlab=xlab, ylab=ylab, ylabs=)
+summary(d.pcx)
+str(d.pcx)
+screeplot(d.pcx) #bar graph showing amt of variance explained by each axis
+
+df_out <- as.data.frame(d.pcx$x)
+PC1<-df_out$PC1                 
+            
+######### Acer2 unadjusted treatment PCA
+# replot PCA with ggplot2 (showing samples only)
+meta$treatment<-as.factor(meta$treatment)
+meta<-meta%>%filter(!treatment == "blank")
+theme_set(theme_bw()+theme(panel.grid.major = element_blank(),panel.grid.minor = element_blank()))
+
+```
+
+
+### beta diversity 
+
+#### beta diversity plot
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.dim = c(8, 6)}
+PCA <-ggplot(df_out,aes(x=PC1,y=PC2,fill=meta$treatment, color = meta$treatment))+
+  geom_point(size=3,shape=21)+
+  theme(axis.title = element_text(size=15))+
+  theme(axis.text=element_text(size=15))+
+  theme(legend.title = element_text(size=15))+
+  theme(legend.text = element_text(size=15))+
+  labs(x=xlab, y=ylab, fill="treatment") + 
+  coord_fixed()+
+  facet_wrap(~meta$treatment)+
+  #stat_ellipse(geom="polygon",alpha=0.3)+
+  scale_fill_manual(values = plot.col.treat)+
+  scale_color_manual(values = plot.col.treat)
+
+PCA
+
+ggsave(file = "fig/PCA_facet.svg", plot = PCA, width = 7, height = 5)
+
+```
+
+
+### Beta diversity dispersion 
+
+```{r}
+########## Figure 4 - Beta Diversity Dispersions
+meta$treatment<- as.factor(meta$treatment)
+#calculate multivariate dispersions based on condition
+
+mod <-betadisper(dist.clrAcer2, t(meta$treatment))
+mod
+#one way anova
+anova(mod)
+
+## Permutation test for F
+permutest(mod, pairwise = TRUE, permutations = 99)
+
+## Tukey's Honest Significant Differences
+(mod.HSD <- TukeyHSD(mod))
+plot(mod.HSD)
+
+#boxplots
+plot(mod)
+boxplot(mod)
+
+## Compute mean distance to centroid per group
+#this just prints values on the console
+tapply(mod$distances, meta$treatment, mean)
+## Same, but variance instead
+tapply(mod$distances, meta$treatment, var)
+
+#Get the distances to centroid from the model
+mod$distances
+dis <- mod$distances
+#melt
+dis.melt <- melt(dis)
+#move rownames to columns so we can merge the dispersion values and metadata
+dis.melt$Sample <- rownames(dis.melt)
+samples$Sample <- rownames(samples)
+#merge metadata and dispersion 
+dis.treat <- merge(samples, dis.melt)
+#rename column
+dis.treat<- dis.treat %>%
+  dplyr::rename(distance = value)
+
+#run linear model to test significance
+distlm <-lmer(distance~treatment + (1|tank), data=dis.treat)
+summary(distlm)
+coefs <- data.frame(coef(summary(distlm)))
+# use normal distribution to approximate p-value
+coefs$p.z <- 2 * (1 - pnorm(abs(coefs$t.value)))
+coefs
+
+```
+
+
+#### dispersion of beta diversity models
+
+ fixed effects: treatment, site, treatment*site, re: tank,genotype
+```{r}
+hist(dis.treat$distance)
+
+#define model
+disp_mod <- bf(distance ~ 1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1|tank) + (1|genotype),
+              family =  gaussian())
+
+##### Get priors
+get_prior(disp_mod, data = dis.treat) 
+
+##### Set priors
+mean(dis.treat$distance[dis.treat$genotype=="31"]) #115
+
+    
+disp_prior <- c(prior(normal(115, 1), class = "Intercept"),
+               prior(normal(0, 1), class = "b"),
+               prior(exponential(1), class = "sd"))
+                          
+# disp_brm <- brm(disp_mod,
+#                data = dis.treat,
+#                prior = disp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(disp_brm, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(disp_brm, type = "dens_overlay", ndraws = 100)
+# bayes_R2(disp_brm) #0.05
+# 
+# describe_posterior(disp_brm)
+# describe_posterior(disp_brm, ci = 0.65)
+
+```
+
+##### Best model of beta diversity dispersion
+- fixed effects: treatment, site,  re: tank,genotype
+```{r}
+hist(dis.treat$distance)
+#define model
+disp_mod2 <- bf(distance ~ 1  + trtNumeric  + origin_site  + (1|tank) + (1|genotype),
+              family =  gaussian())
+
+disp_brm2 <- brm(disp_mod2,
+               data = dis.treat,
+               prior = disp_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               warmup = n_warmup)
+#save model
+saveRDS(disp_brm2, "model outputs/disp_brm2.RDS")
+disp_brm2 <- readRDS("model outputs/disp_brm2.RDS")
+
+pp_check(disp_brm2, type = "loo_pit_overlay", ndraws = 100)
+pp_check(disp_brm2, type = "dens_overlay", ndraws = 100)
+bayes_R2(disp_brm2) #0.02
+#model_weights(disp_brm2, disp_brm) #better without interaction
+
+describe_posterior(disp_brm2, ci = 0.95)
+describe_posterior(disp_brm2, ci = 0.65)
+
+```
+
+ fixed effects: treatment, site, re: genotype
+```{r}
+hist(dis.treat$distance)
+#define model
+disp_mod3 <- bf(distance ~ 1  + trtNumeric  + origin_site  + (1|genotype),
+              family =  gaussian())
+                          
+# disp_brm3 <- brm(disp_mod3,
+#                data = dis.treat,
+#                prior = disp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(disp_brm3, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(disp_brm3, type = "dens_overlay", ndraws = 100)
+# bayes_R2(disp_brm3) #0.02
+# model_weights(disp_brm2, disp_brm3) #2 is better with tank
+# 
+# describe_posterior(disp_brm2)
+# describe_posterior(disp_brm2, ci = 0.65)
+
+```
+
+ fixed effects: treatment, site, treatment*site, re: tank
+```{r}
+hist(dis.treat$distance)
+#define model
+disp_mod4 <- bf(distance ~ 1  + trtNumeric  + origin_site  + (1|tank),
+              family =  gaussian())
+                          
+# disp_brm4 <- brm(disp_mod4,
+#                data = dis.treat,
+#                prior = disp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(disp_brm4, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(disp_brm4, type = "dens_overlay", ndraws = 100)
+# bayes_R2(disp_brm4) #0.02
+# model_weights(disp_brm2, disp_brm4) #better with genotype
+```
+
+
+ fixed effects: treatment, re: 1|tank, 1|genotype
+```{r}
+#define model
+disp_mod5 <- bf(distance ~ 1  + trtNumeric   + (1|tank) + (1|genotype),
+              family =  gaussian())
+                          
+# disp_brm5 <- brm(disp_mod5,
+#                data = dis.treat,
+#                prior = disp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(disp_brm5, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(disp_brm5, type = "dens_overlay", ndraws = 100)
+# bayes_R2(disp_brm5) #0.02
+# model_weights(disp_brm5, disp_brm2) #better with site!
+
+```
+
+
+ fixed effects: treatment, re: 1+trtNumeric|tank, 1+trtNumeric|genotype
+```{r}
+#define model
+disp_mod6 <- bf(distance ~ 1  + trtNumeric   + origin_site + (1+ trtNumeric|tank) + (1+ trtNumeric|genotype),
+              family =  gaussian())
+                          
+# disp_brm6 <- brm(disp_mod6,
+#                data = dis.treat,
+#                prior = disp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(disp_brm6, type = "loo_pit_overlay", ndraws = 100)
+# pp_check(disp_brm6, type = "dens_overlay", ndraws = 100)
+# bayes_R2(disp_brm6) #0.05
+# model_weights(disp_brm6, disp_brm2) #better without nesting vars
+
+```
+
+
+### Taxonomy Bargraphs
+- Using Fantaxtic package
+
+```{r}
+#Fantaxtic bar graph
+colors<-gen_colors(21) #generate palette
+top<-get_top_taxa(ps2Rare,n=20,discard_other = FALSE) #choose number of taxa to display
+
+topClasstreatment<-fantaxtic_bar(top,
+                    color_by = "Class",
+                    order_alg = "hclust",
+                    facet_by = "treatment",
+                    facet_type = "grid", palette = colors)+
+                  ggtitle("Taxonomic composition (Class) bargraph by DO treatment")
+topClasstreatment
+
+
+ggsave("fig/topClasstreatment.pdf") ##Save to .pdf file
+topClasstreatment # Code of the plot
+dev.off() # Close the graphics device
+```
+
+
+### Core microbiome 
+
+```{r}
+
+#subset for each treatment
+
+###Make compositional relative abundance phyloseq
+psAcer2RA <- microbiome::transform(ps2Rare, "compositional")
+#head(prevalence(psAcer2RA, detection = 1/1000, sort = TRUE))
+
+##Prune taxa
+psAcer2RA2<-prune_taxa(taxa_sums(psAcer2RA)>0, psAcer2RA)
+#psAcer2RA2<-taxglom(psAcer2RA2, "Genus")
+
+# Get the taxonomic table from the phyloseq object
+tax_table <- tax_table(psAcer2RA2)
+# Remove the lowest taxonomic level (species)
+tax_table <- tax_table[, -c(7,8)]
+# Update the taxonomic table in the phyloseq object
+tax_table(psAcer2RA2) <- tax_table
+
+#Best hit names
+psAcer2RA2<-format_to_besthit(psAcer2RA2)
+
+
+pseq.core2 <- aggregate_rare(psAcer2RA2, "best_hit", detection = 0.001, prevalence = .9)
+View(tax_table(ps2Rare))
+otu_table(pseq.core2)
+
+# Example data matrix
+data <- t(otu_table(pseq.core2))%>%
+  as.data.frame()
+
+metaSampleTrt<- meta%>%
+  dplyr::select(c(SampleID, treatment))
+
+# Subset data matrix for core taxa
+core_data <- data%>%
+  dplyr::select(-`Other`)%>%
+  rownames_to_column("SampleID")%>%
+  left_join(metaSampleTrt, by = "SampleID")%>%
+  #filter(treatment=="0")%>%
+  pivot_longer(cols = `ASV1:Alteromonadaceae`:`ASV9:Oceanospirillum`, names_to = "Taxa", values_to = "relativeAbundance")
+
+breaks <- c(0, 0.1, 0.2, 0.3, 0.4)
+
+# Plot using ggplot
+core_heatmap_0 <- core_data%>%
+  filter(treatment=="0")%>%
+  ggplot() +                       
+  geom_tile(aes(x = SampleID, y = Taxa, fill = relativeAbundance)) +        # Define variables to plot
+  scale_fill_gradientn(colors = viridis(n = 10, direction = -1), 
+                       breaks = breaks, 
+                       limits = c(0, 0.4), 
+                       na.value = "transparent") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+core_heatmap_0
+ggsave(core_heatmap_0, file="fig/core_diy_heat_0.svg", width = 8, height = 5)
+
+# Plot using ggplot
+core_heatmap_2 <- core_data%>%
+  filter(treatment=="2")%>%
+  ggplot() +                       
+  geom_tile(aes(x = SampleID, y = Taxa, fill = relativeAbundance)) +        # Define variables to plot
+  scale_fill_gradientn(colors = viridis(n = 10, direction = -1), 
+                       breaks = breaks, 
+                       limits = c(0, 0.4), 
+                       na.value = "transparent") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+core_heatmap_2
+ggsave(core_heatmap_2, file="fig/core_diy_heat_2.svg", width = 8, height = 5)
+
+
+# Plot using ggplot
+core_heatmap_4 <- core_data%>%
+  filter(treatment=="4")%>%
+  ggplot() +                       
+  geom_tile(aes(x = SampleID, y = Taxa, fill = relativeAbundance)) +        # Define variables to plot
+  scale_fill_gradientn(colors = viridis(n = 10, direction = -1), 
+                       breaks = breaks, 
+                       limits = c(0, 0.4), 
+                       na.value = "transparent") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+core_heatmap_4
+ggsave(core_heatmap_4, file="fig/core_diy_heat_4.svg", width = 8, height = 5)
+
+# Plot using ggplot
+core_heatmap_6 <- core_data%>%
+  filter(treatment=="6")%>%
+  ggplot() +                       
+  geom_tile(aes(x = SampleID, y = Taxa, fill = relativeAbundance)) +        # Define variables to plot
+  scale_fill_gradientn(colors = viridis(n = 10, direction = -1), 
+                       breaks = breaks, 
+                       limits = c(0, 0.4), 
+                       na.value = "transparent") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+core_heatmap_6
+ggsave(core_heatmap_6, file="fig/core_diy_heat_6.svg", width = 8, height = 5)
+```
+
+
+## Permanova
+
+> Permanova stands for Permutational Multivariate Analysis of Variance Using Distance Matrices. It is used to compare groups of objects and test the null hypothesis that the centroids and dispersion of the groups as defined by measure space are equivalent for all groups.
+
+(Source: [https://archetypalecology.wordpress.com/2018/02/21/permutational-multivariate-analysis-of-variance-permanova-in-r-preliminary/\#:\~:text=Permutational%20multivariate%20analysis%20of%20variance%20(PERMANOVA)%20is%20a%20non%2D,are%20equivalent%20for%20all%20groups](https://archetypalecology.wordpress.com/2018/02/21/permutational-multivariate-analysis-of-variance-permanova-in-r-preliminary/#:~:text=Permutational%20multivariate%20analysis%20of%20variance%20(PERMANOVA)%20is%20a%20non%2D,are%20equivalent%20for%20all%20groups){.uri} )
+
+```{r permanovas}
+
+# permanova between groups using tank as strata
+adonis2(dist.clrAcer2~treatment + origin_site + treatment*origin_site + genotype, data = meta, strata=meta$tank) 
+
+# permanova between groups without tank as strata
+adonis2(dist.clrAcer2~treatment + origin_site + treatment*origin_site + genotype, data = meta) 
+
+
+```
+
+
+## ANCOM differential abundance
+
+1.  Acer2 - treatment, origin site, genotype
+2.  Field - origin site, genotype
+
+
+### Function setup
+
+```{r ANCOM functions}
+ancom.W = function(otu_data,var_data,
+                   adjusted,repeated,
+                   main.var,adj.formula,
+                   repeat.var,long,rand.formula,
+                   multcorr,sig){
+  
+  n_otu=dim(otu_data)[2]-1
+  
+  otu_ids=colnames(otu_data)[-1]
+  
+  if(repeated==F){
+    data_comp=data.frame(merge(otu_data,var_data,by="Sample.ID",all.y=T),row.names=NULL)
+    #data_comp=data.frame(merge(otu_data,var_data[,c("Sample.ID",main.var)],by="Sample.ID",all.y=T),row.names=NULL)
+  }else if(repeated==T){
+    data_comp=data.frame(merge(otu_data,var_data,by="Sample.ID"),row.names=NULL)
+    # data_comp=data.frame(merge(otu_data,var_data[,c("Sample.ID",main.var,repeat.var)],by="Sample.ID"),row.names=NULL)
+  }
+  
+  base.formula = paste0("lr ~ ",main.var)
+  if(repeated==T){
+    repeat.formula = paste0(base.formula," | ", repeat.var)
+  }
+  if(adjusted==T){
+    adjusted.formula = paste0(base.formula," + ", adj.formula)
+  }
+  
+  if( adjusted == F & repeated == F ){
+    fformula  <- formula(base.formula)
+  } else if( adjusted == F & repeated == T & long == T ){
+    fformula  <- formula(base.formula)   
+  }else if( adjusted == F & repeated == T & long == F ){
+    fformula  <- formula(repeat.formula)   
+  }else if( adjusted == T & repeated == F  ){
+    fformula  <- formula(adjusted.formula)   
+  }else if( adjusted == T & repeated == T  ){
+    fformula  <- formula(adjusted.formula)   
+  }else{
+    stop("Problem with data. Dataset should contain OTU abundances, groups, 
+         and optionally an ID for repeated measures.")
+  }
+  
+  
+  
+  if( repeated==FALSE & adjusted == FALSE){
+    if( length(unique(data_comp[,which(colnames(data_comp)==main.var)]))==2 ){
+      tfun <- exactRankTests::wilcox.exact
+    } else{
+      tfun <- stats::kruskal.test
+    }
+  }else if( repeated==FALSE & adjusted == TRUE){
+    tfun <- stats::aov
+  }else if( repeated== TRUE & adjusted == FALSE & long == FALSE){
+    tfun <- stats::friedman.test
+  }else if( repeated== TRUE & adjusted == FALSE & long == TRUE){
+    tfun <- nlme::lme
+  }else if( repeated== TRUE & adjusted == TRUE){
+    tfun <- nlme::lme
+  }
+  
+  logratio.mat <- matrix(NA, nrow=n_otu, ncol=n_otu)
+  for(ii in 1:(n_otu-1)){
+    for(jj in (ii+1):n_otu){
+      data.pair <- data_comp[,which(colnames(data_comp)%in%otu_ids[c(ii,jj)])]
+      lr <- log((1+as.numeric(data.pair[,1]))/(1+as.numeric(data.pair[,2])))
+      
+      lr_dat <- data.frame( lr=lr, data_comp,row.names=NULL )
+      
+      if(adjusted==FALSE&repeated==FALSE){  ## Wilcox, Kruskal Wallis
+        logratio.mat[ii,jj] <- tfun( formula=fformula, data = lr_dat)$p.value
+      }else if(adjusted==FALSE&repeated==TRUE&long==FALSE){ ## Friedman's 
+        logratio.mat[ii,jj] <- tfun( formula=fformula, data = lr_dat)$p.value
+      }else if(adjusted==TRUE&repeated==FALSE){ ## ANOVA
+        model=tfun(formula=fformula, data = lr_dat,na.action=na.omit)   
+        picker=which(gsub(" ","",row.names(summary(model)[[1]]))==main.var)  
+        logratio.mat[ii,jj] <- summary(model)[[1]][["Pr(>F)"]][picker]
+      }else if(repeated==TRUE&long==TRUE){ ## GEE
+        model=tfun(fixed=fformula,data = lr_dat,
+                   random = formula(rand.formula),
+                   correlation=corAR1(),
+                   na.action=na.omit)   
+        picker=which(gsub(" ","",row.names(anova(model)))==main.var)
+        logratio.mat[ii,jj] <- anova(model)[["p-value"]][picker]
+      }
+      
+    }
+  } 
+  
+  ind <- lower.tri(logratio.mat)
+  logratio.mat[ind] <- t(logratio.mat)[ind]
+  
+  
+  logratio.mat[which(is.finite(logratio.mat)==FALSE)] <- 1
+  
+  mc.pval <- t(apply(logratio.mat,1,function(x){
+    s <- p.adjust(x, method = "BH")
+    return(s)
+  }))
+  
+  a <- logratio.mat[upper.tri(logratio.mat,diag=FALSE)==TRUE]
+  
+  b <- matrix(0,ncol=n_otu,nrow=n_otu)
+  b[upper.tri(b)==T] <- p.adjust(a, method = "BH")
+  diag(b)  <- NA
+  ind.1    <- lower.tri(b)
+  b[ind.1] <- t(b)[ind.1]
+  
+  #########################################
+  ### Code to extract surrogate p-value
+  surr.pval <- apply(mc.pval,1,function(x){
+    s0=quantile(x[which(as.numeric(as.character(x))<sig)],0.95)
+    # s0=max(x[which(as.numeric(as.character(x))<alpha)])
+    return(s0)
+  })
+  #########################################
+  ### Conservative
+  if(multcorr==1){
+    W <- apply(b,1,function(x){
+      subp <- length(which(x<sig))
+    })
+    ### Moderate
+  } else if(multcorr==2){
+    W <- apply(mc.pval,1,function(x){
+      subp <- length(which(x<sig))
+    })
+    ### No correction
+  } else if(multcorr==3){
+    W <- apply(logratio.mat,1,function(x){
+      subp <- length(which(x<sig))
+    })
+  }
+  
+  return(W)
+}
+
+
+
+ANCOM.main = function(OTUdat,Vardat,
+                      adjusted,repeated,
+                      main.var,adj.formula,
+                      repeat.var,longitudinal,
+                      random.formula,
+                      multcorr,sig,
+                      prev.cut){
+  
+  p.zeroes=apply(OTUdat[,-1],2,function(x){
+    s=length(which(x==0))/length(x)
+  })
+  
+  zeroes.dist=data.frame(colnames(OTUdat)[-1],p.zeroes,row.names=NULL)
+  colnames(zeroes.dist)=c("Taxon","Proportion_zero")
+  
+  zero.plot = ggplot(zeroes.dist, aes(x=Proportion_zero)) + 
+    geom_histogram(binwidth=0.1,colour="black",fill="white") + 
+    xlab("Proportion of zeroes") + ylab("Number of taxa") +
+    theme_bw()
+  
+  #print(zero.plot)
+  
+  OTUdat.thinned=OTUdat
+  OTUdat.thinned=OTUdat.thinned[,c(1,1+which(p.zeroes<prev.cut))]
+  
+  otu.names=colnames(OTUdat.thinned)[-1]
+  
+  W.detected   <- ancom.W(OTUdat.thinned,Vardat,
+                          adjusted,repeated,
+                          main.var,adj.formula,
+                          repeat.var,longitudinal,random.formula,
+                          multcorr,sig)
+  
+  W_stat       <- W.detected
+  
+  
+  ### Bubble plot
+  
+  W_frame = data.frame(otu.names,W_stat,row.names=NULL)
+  W_frame = W_frame[order(-W_frame$W_stat),]
+  
+  W_frame$detected_0.9=rep(FALSE,dim(W_frame)[1])
+  W_frame$detected_0.8=rep(FALSE,dim(W_frame)[1])
+  W_frame$detected_0.7=rep(FALSE,dim(W_frame)[1])
+  W_frame$detected_0.6=rep(FALSE,dim(W_frame)[1])
+  
+  W_frame$detected_0.9[which(W_frame$W_stat>0.9*(dim(OTUdat.thinned[,-1])[2]-1))]=TRUE
+  W_frame$detected_0.8[which(W_frame$W_stat>0.8*(dim(OTUdat.thinned[,-1])[2]-1))]=TRUE
+  W_frame$detected_0.7[which(W_frame$W_stat>0.7*(dim(OTUdat.thinned[,-1])[2]-1))]=TRUE
+  W_frame$detected_0.6[which(W_frame$W_stat>0.6*(dim(OTUdat.thinned[,-1])[2]-1))]=TRUE
+  
+  final_results=list(W_frame,zero.plot)
+  names(final_results)=c("W.taxa","PLot.zeroes")
+  return(final_results)
+}
+```
+
+### Data setup - family level
+
+```{r Acer 2 and Field ANCOM prep done together}
+
+datAcer2Family <- tax_glom(ps2Rare, taxrank = "Family") #at the Family level
+rank.names(ps2Rare)
+datAcer2_asv <- aggregate_taxa(ps2Rare, "ASV_ID") #at the ASV level
+datAcer2_family <- aggregate_taxa(ps2Rare, "Family") #at the Family level - combines families
+#datField <- tax_glom(ps_field, taxrank = "Family")
+
+#melt the data, so it's like a dataframe
+datmAcer2 <- psmelt(datAcer2_family)
+#datmField <- psmelt(datField)
+
+#Cast the new datatable with columns that are of interest
+datc_Acer2 <- data.table::dcast(datmAcer2, Sample + tank + origin_site + treatment  ~ Family, value.var = 'Abundance', fun.aggregate = sum)
+#datc_field <- data.table::dcast(datmField,  Sample + experiment + origin_site + genotype ~ Family, value.var = 'Abundance', fun.aggregate = sum)
+
+dim(datc_Acer2) #[1]  74 x 321
+
+otudAcer2 <- datc_Acer2[,c(1,5:321)] #select the first column, and then all of the taxa columns  
+
+colnames(otudAcer2)[1] <- "Sample.ID" #rename the first column to Sample.ID - this is to match ANCOM syntax
+metadatAcer2 <- sample_data(ps2Rare) #get the sample data
+
+metadatAcer2 <- as.data.frame(as.matrix(metadatAcer2)) #make into into a matrix
+
+# at this point, my sample id numbers are the row names, not a separate column, move row names to column with dplylr
+
+metadatAcer2 <- tibble::rownames_to_column(metadatAcer2, "Sample.ID") #make sure the sample names column is called Sample.ID
+
+names(otudAcer2) <- make.names(names(otudAcer2)) #get the names from the table for 
+
+otu_test <- otudAcer2 #rename otud to otu_test, for syntax in ANCOM
+
+metadatAcer2 <- dplyr::select(metadatAcer2, c("Sample.ID","treatment","origin_site","tank")) # use select to only use treatment columns of interest
+map_test <- metadatAcer2 #rename map_TEst
+Vardat <- map_test #specify that this for Vardat - ANCOM syntax
+```
+
+
+### Running analysis and plotting relative abundances
+
+1.  ANCOM main: treatment
+
+```{r Main:treatment Adj.:Site}
+#### ANCOM test - Adjusted by origin site, ANOVA (adjusting doesnt seem to have an effect on the list of families, but might on the numbers?)
+Ancom1=ANCOM.main(OTUdat=otu_test, #calling the OTU table
+                                 Vardat=map_test, #calling the metadata
+                                 adjusted=TRUE, #true if covariates are to be included for adjustment
+                                 repeated=FALSE, #repeated measure
+                                 main.var="treatment", #main variable or fator
+                                 adj.formula = "tank",
+                                 random.formula = "~ 1 | tank", #random variable
+                                 repeat.var=FALSE, #repeated measure
+                                 long = FALSE, #longitudinal study
+                                 multcorr=2,
+                                 sig=0.05, #significance level
+                                 prev.cut=0.5) #OTUs with proportion of zeroes greater than prev.cut are not included in the analysis
+
+res3_TS <- Ancom1$W.taxa #taxa that significantly vary across factor level of interest
+#write.table(res3_TS,"BothRunsAcer2ANCOM_family_ANOVA.txt",sep="\t",col.names=NA)
+res4_TS <- res3_TS[which(res3_TS$detected_0.8==TRUE),] 
+
+Fams_TS <- glue::glue_collapse(droplevels(factor(res4_TS$otu.names)), sep = ", ") #this is to get a list of the families that are different
+print(Fams_TS)
+#Candidatus_Peregrinibacteria, Bacteriovoracaceae, Cryomorphaceae, Shewanellaceae, Rhodospirillaceae, Thalassobaculaceae, Deltaproteobacteria, Family_XII, Flavobacteriaceae, Rickettsiaceae, Saprospiraceae, Colwelliaceae, Nitrincolaceae, UBA12409, Margulisbacteria, Arcobacteraceae, Simkaniaceae, Bacteria
+
+tax<-tax_table(ps2Rare)
+tax<-as.data.frame(tax)
+
+tax2<-tax%>%
+  filter(Family %in% c("Holosporaceae", "Family_XII","Colwelliaceae", "Nitrincolaceae", "Flavobacteriaceae","UBA12409", "Margulisbacteria", "Thalassobaculaceae", "Rhodospirillaceae", "Bacteriovoracaceae", "Candidatus_Peregrinibacteria", "Cryomorphaceae", "Arcobacteraceae", "Simkaniaceae", "Shewanellaceae", "Beggiatoaceae", "Caenarcaniphilales", "Deltaproteobacteria", "Saprospiraceae", "PB19", "Rickettsiaceae", "Bacteria"))
+write.csv(tax2, "FAMILIES_Ancom_27May23.csv")
+
+#Calculate relative abundance
+datc_relabund_TS <-  sweep(datc_Acer2[,7:323], 1, rowSums(datc_Acer2[,7:323]), '/')
+datc_relnames_TS <- cbind(datc_Acer2[,1:6],datc_relabund_TS)
+
+#only select the significant families
+sig_dis_TS <- dplyr::select(datc_relnames_TS, Sample, treatment, tank, "Holosporaceae", "Family_XII","Colwelliaceae", "Nitrincolaceae", "Flavobacteriaceae","UBA12409", "Margulisbacteria", "Thalassobaculaceae", "Rhodospirillaceae", "Bacteriovoracaceae", "Candidatus_Peregrinibacteria", "Cryomorphaceae", "Arcobacteraceae", "Simkaniaceae", "Shewanellaceae", "Beggiatoaceae", "Caenarcaniphilales", "Deltaproteobacteria", "Saprospiraceae", "PB19", "Rickettsiaceae", "Bacteria")
+sig_long_TS <- melt(sig_dis_TS, id.vars=c("Sample","treatment","tank"),variable.name="Family",value.name="Proportion")
+
+sum_sig_TS <- Rmisc::summarySE(sig_long_TS, measurevar = "Proportion", groupvars = c("treatment","Family"), na.rm=TRUE)
+
+#colsTS<-c("0.5"="#EA7B3F","2"="#F5E06B","4"="#7EEA9C","6"="#56C7D3")
+sum_sig_TS$treatment<-factor(sum_sig_TS$treatment, levels=c("0","2","4","6"))
+require(scales)
+
+AncomTS_plot<- ggplot(sum_sig_TS, aes(x=Family, y=Proportion+0.001))+
+  geom_point(size=4,aes(color=treatment))+
+  scale_colour_manual(values=plot.col.treat)+
+  coord_flip()+
+  mytheme+
+  theme(axis.text.x=element_text(size=14))+
+  theme(axis.text.y=element_text(size=14))+
+  theme(axis.title.x=element_text(size=14))+
+  theme(axis.title.y=element_text(size=14))+
+  theme(legend.justification=c(1,1), legend.position=c(1,1))+
+  geom_errorbar(aes(ymin=Proportion+0.001-se, ymax=Proportion+0.001+se, color=treatment), width=.1)+
+  theme(legend.title = element_blank())+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),labels = trans_format("log10", math_format(10^.x)))+
+  ggtitle("ANCOM analysis for differential abundance")+
+  theme(legend.text = element_text(size=12))
+AncomTS_plot
+ggsave(file = "fig/AncomTS_plot_all_27May23.svg", plot = AncomTS_plot, width = 7, height = 5)
+
+
+###Ones that follow an oxygen gradient: "Holosporaceae", "Family_XII","Colwelliaceae", "Nitrincolaceae", "Flavobacteriaceae","UBA12409", "Margulisbacteria", "Thalassobaculaceae", "Rhodospirillaceae", "Bacteriovoracaceae", "Candidatus_Peregrinibacteria", "Cryomorphaceae", "Arcobacteraceae", "Simkaniaceae", "Shewanellaceae", "Beggiatoaceae", "Caenarcaniphilales", "Deltaproteobacteria", "Saprospiraceae", "PB19", "Rickettsiaceae", "Bacteria"
+ 
+View(Ancom1$W.taxa)
+
+###SELECT ONLY THOSE THAT FOLLOW O2 GRADIENTS
+
+#only select the significant families
+sig_dis_TSO2GRAD <- dplyr::select(datc_relnames_TS, Sample, treatment, tank, "Holosporaceae", "Rhodospirillaceae","Flavobacteriaceae", "Nitrincolaceae", "Arcobacteraceae","Colwelliaceae", "Shewanellaceae", "Beggiatoaceae", "Caenarcaniphilales", "PB19")
+sig_long_TS <- melt(sig_dis_TSO2GRAD, id.vars=c("Sample","treatment","tank"),variable.name="Family",value.name="Proportion")
+
+sum_sig_TS <- Rmisc::summarySE(sig_long_TS, measurevar = "Proportion", groupvars = c("treatment","Family"), na.rm=TRUE)
+
+#colsTS<-c("0."="orangered2","2"="darkorange","4"="gold","6"="palegreen2")
+sum_sig_TS$treatment<-factor(sum_sig_TS$treatment, levels=c("0","2","4","6"))
+require(scales)
+
+AncomTS_plotO2GRAD<- ggplot(sum_sig_TS, aes(x=Family, y=Proportion+0.001))+
+  geom_point(size=4,aes(color=treatment))+
+  scale_colour_manual(values=plot.col.treat)+
+  coord_flip()+
+  theme_bw()+
+  theme(axis.text.x=element_text(size=14))+
+  theme(axis.text.y=element_text(size=14))+
+  theme(axis.title.x=element_text(size=14))+
+  theme(axis.title.y=element_text(size=14))+
+  theme(legend.position="right")+
+  geom_errorbar(aes(ymin=Proportion+0.001-se, ymax=Proportion+0.001+se, color=treatment), width=.1)+
+  theme(legend.title = element_blank())+
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),labels = trans_format("log10", math_format(10^.x)))+
+  theme(legend.text = element_text(size=12))
+AncomTS_plotO2GRAD
+
+
+ggsave(file = "fig/AncomTS_plotO2GRAD_27May23.svg", plot = AncomTS_plotO2GRAD, width = 7, height = 5)
+
+
+###Ones that follow an oxygen gradient: "Flavobacteriales","Nitrincolaceae","Caenarcaniphilales","Thalassobaculaceae", "Shewanellaceae","Holosporaceae", "Rhodospirillaceae"
+```
+
