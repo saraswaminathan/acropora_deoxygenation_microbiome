@@ -1,0 +1,809 @@
+---
+title: "1_SiteComparisonEnvironmental"
+author: "Sara Devi Swaminathan"
+date: "`r Sys.Date()`"
+output: html_document
+toc: true
+toc_float: true
+number_sections: true
+---
+# Table of Contents {#table-of-contents}
+
+## Setup: working directory and packages
+
+Load libraries and set working directory
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(zoo)
+library(parallel)
+library(brms)
+library(reshape2)
+library(bayestestR)
+```
+
+## Read in data and filter sites and partial days
+
+```{r}
+# Load data frame
+YSIdata19 <- read.csv("data/sonde_data_withSeptNurseryMinidot.csv") %>%
+  dplyr::select(site, date, time, Depth, DOmgL, Sal_PSU, pH, Temp_degC, CHL_uGL, Turb_FNU, TDS_mgL) %>% #select columns we use
+  mutate(date = as.Date(date, format = '%m/%d/%y')) %>% # reformat date
+  filter(site %in% c("munson", "nursery"))%>%
+  mutate(site = factor(site, levels = c("nursery", "munson"))) %>%
+  mutate(DT = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M:%S")) %>% # make DateTime column
+  mutate(fulldays = factor(ifelse(date >= "2019-06-12" & date <= "2019-07-07", "JJ",
+                       ifelse(date >= "2019-07-10" & date <= "2019-08-04", "JA",
+                          ifelse(date >= "2019-08-07" & date <= "2019-09-08", "AS",
+                                  ifelse(date >= "2019-09-10" & date <= "2019-10-07", "SO", NA)))))) %>% #mark full days with deployment months, NA for partial days
+  mutate(fulldays = factor(fulldays, levels = c("JJ", "JA", "AS", "SO"))) %>%
+  arrange(site, DT)
+
+#filter to only sites where corals were collected for this experiment
+YSIfiltered <- YSIdata19 %>%
+  filter(site %in% c("munson", "nursery"))%>%
+  filter(!is.na(fulldays)) %>%
+  group_by(site) %>%
+  arrange(site, DT)
+
+```
+
+# calculate rolling averages of DO, Turbidity, TDS, pH, and Salinity
+
+```{r}
+YSI_ma <- YSIfiltered %>%
+  dplyr::group_by(site) %>%
+  dplyr::arrange(DT, .by_group = TRUE) %>% #arrange by datetime and group by site
+  mutate(maTemp_24 = rollmean(Temp_degC, k = 144, fill = NA),  # 24-hr temp running average (24 hrs * 60 min = 1440. Divided by measurements every 10 minutes.)
+    maDO_24 = rollmean(DOmgL, k = 144, fill = NA),  # 24-hr DO running average
+    maTurb_24 = rollmean(Turb_FNU, k = 144, fill = NA),
+    maTDS_24 = rollmean(TDS_mgL, k = 144, fill = NA),
+    mapH_24 = rollmean(pH, k = 144, fill = NA),
+    maSal_24 = rollmean(Sal_PSU, k = 144, fill = NA))
+
+# filter to munson (inshore) alone
+ma_munson <- YSI_ma %>%
+  filter(site == "munson") 
+
+# filter to nursery (offshore) alone
+ma_nursery <- YSI_ma %>%
+  filter(site == "nursery")
+
+# summarize moving average df with mins and max values
+ysiSumm <- YSI_ma %>%
+  group_by(site, date)%>%
+  mutate(DOmax = max(DOmgL), 
+            DOmin = min(DOmgL), 
+            DOmean = mean(DOmgL), 
+            tempMax = max(Temp_degC), 
+            tempMin = min(Temp_degC), 
+            tempMean = mean(Temp_degC), 
+            Turbmax = max(Turb_FNU), 
+            Turbmin = min(Turb_FNU), 
+            Turbmean = mean(Turb_FNU), 
+            pHmax = max(pH),
+            pHmin = min(pH),
+            pHmean = mean(pH), 
+            Sal_PSUmax = max(Sal_PSU),
+            Sal_PSUmin = min(Sal_PSU),
+            Sal_PSUmean = mean(Sal_PSU),
+            TDSMax = max(TDS_mgL), 
+            TDSMin = min(TDS_mgL), 
+            TDSMean = mean(TDS_mgL))
+
+# find all instances of DO less than 4mg/L
+lowDO<-YSI_ma%>%
+  filter(DOmgL<4)
+
+# subset to temp data
+YSI_ma_temp<- YSI_ma %>%
+  mutate(datetime_index = as.numeric(DT))%>%
+  dplyr::select(Temp_degC, site, DT, datetime_index, maTemp_24)%>%
+  unique()%>%
+  group_by(datetime_index, site)%>%
+  summarise(Temp_degC = mean(Temp_degC))%>%
+  mutate(logTemp = log(Temp_degC))
+
+# subset to DO data
+YSI_ma_do<- YSI_ma %>%
+  mutate(datetime_index = as.numeric(DT))%>%
+  dplyr::select(DOmgL, site, DT, datetime_index, maDO_24)%>%
+  unique()%>%
+  group_by(datetime_index, site)%>%
+  summarise(DOmgL = mean(DOmgL))
+```
+
+# set plotting colors 
+```{r}
+siteColorsPoint = c("munson" = "#f4a582", "nursery" = "#abd9e9")
+siteColorsLine = c("munson" = "#d7191c", "nursery" = "#2c7bb6")
+```
+
+## calculate days Munson average temp > 31 deg (50days)
+```{r}
+ma_munson%>%
+  ungroup()%>%
+  dplyr::group_by(date)%>%
+  summarise(dailyMean = mean(maTemp_24))%>%
+  filter(dailyMean > 31)
+
+ma_munson%>%
+  summarise(mean = mean(Temp_degC))
+```
+
+## calculate days Nursery average > 31 deg (14)
+```{r}
+ma_nursery%>%
+  group_by(date)%>%
+  summarise(dailyMean = mean(maTemp_24))%>%
+  filter(dailyMean > 31)
+
+ma_nursery%>%
+  summarise(mean = mean(Temp_degC))
+```
+
+## calculate mean diel fluctuation at each site
+```{r}
+YSI_ma %>%
+  select(date, site, Temp_degC)%>%
+  group_by(date, site)%>%
+  summarise(min = min(Temp_degC), 
+         max = max(Temp_degC),
+         diel = max - min)%>%
+  ungroup()%>%
+  group_by(site)%>%
+  summarise(meanDiel = mean(diel))
+```
+
+# Temperature plot
+
+## with points
+```{r}
+# Plot 24-running average over raw
+bothSitesTempplot <- ggplot(data = YSI_ma, aes(x = DT)) +
+  geom_point(aes(y = Temp_degC, fill = site), size = 1, shape = 21, alpha = 0.3, stroke = 0) +
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  geom_line(aes (y = maTemp_24, color = site), size = 1) +
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(title = "Summer 2019 temperatures at inshore and offshore sites",  
+       #subtitle = "2019",
+       x = "\nDate", # \n makes space above and below
+       y = "Temp (\u00B0C)\n") +
+  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(27.5,33),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
+    breaks = seq(27.5,33,1)) +  # Defines breaks in a sequence from 3 to 9.5 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-06-12", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c("12 Jun", "1 Jul", "1 Aug", "1 Sep", "1 Oct")) +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10))
+# minor_breaks = as.POSIXct(c("2019-06-01", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")) 
+bothSitesTempplot # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/TempbothSites2019.pdf", plot = bothSitesTempplot, width = 8, height = 6)
+ggsave(file = "fig/TempbothSites2019.svg", plot = bothSitesTempplot, width = 8, height = 6)
+```
+
+## with geom ribbon
+
+```{r}
+# Plot 24-running average over raw
+(bothSitesTemp_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = tempMin, ymax = tempMax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maTemp_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "Temp (\u00B0C)\n") +
+  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(27.5,33),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
+    breaks = seq(27.5,33,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1 Jul 2019", "1 Aug 2019", "1 Sep 2019", "1 Oct 2019")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitesTemp_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitesTemp_simp.svg", plot = bothSitesTemp_simp, width = 8, height = 6)
+
+ggsave(file = "fig/bothSitesTemp_simp.pdf", plot = bothSitesTemp_simp, width = 8, height = 6)
+```
+
+# DO plot
+## with points
+
+```{r}
+# Plot 24-running average over raw
+bothSitesDOplot <- ggplot(data = YSI_ma, aes(x = DT)) +
+  geom_point(aes(y = DOmgL, fill = site), size = 1, shape = 21, alpha = 0.3, stroke = 0) +
+  geom_line(aes (y = maDO_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(title = "Site DO differences",  
+       #subtitle = "2019",
+       x = "\nDate", # \n makes space above and below
+       y = "DO mg/L") +
+  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(3,8),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
+    breaks = seq(3,8,1)) +  # Defines breaks in a sequence from 3 to 9.5 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-06-12", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c("12 Jun", "1 Jul", "1 Aug", "1 Sep", "1 Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none")
+  
+bothSitesDOplot # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/DObothSites_bothSegments.pdf", plot = bothSitesDOplot, width = 8, height = 6)
+ggsave(file = "fig/DObothSites_bothSegments.svg", plot = bothSitesDOplot, width = 8, height = 6)
+```
+
+## with geom ribbon
+
+```{r}
+# Plot 24-running average over raw
+(bothSitesDO_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site))+
+  geom_ribbon(aes(ymin = DOmin, ymax = DOmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maDO_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "DO (mg/L)") +
+  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(0,8),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
+    breaks = seq(0,8,2)) +  # Defines breaks in a sequence from 3 to 9.5 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1 Jul 2019", "1 Aug 2019", "1 Sep 2019", "1 Oct 2019")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitesDO_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitesDO_simp.svg", plot = bothSitesDO_simp, width = 8, height = 6)
+ggsave(file = "fig/bothSitesDO_simp.pdf", plot = bothSitesDO_simp, width = 8, height = 6)
+``` 
+
+## Bayesian models of environmental data
+
+## First, set instructions for sampler
+
+```{r}
+n_cores <- detectCores() # this will determine how many cores your computer has so that it can use all of its processing power
+n_chains <- 2 
+n_iter <- 4000
+n_warmup <- 2000
+```
+
+# temperature models - temp_brm5 is the best model
+
+```{r}
+hist(YSI_ma$maTemp_24) # visualize data
+hist(log(YSI_ma$maTemp_24)) # visualize data
+########################################################################################################################################
+
+#define model
+temp_mod1 <- bf(Temp_degC ~  site + s(datetime_index,by = site, m = 1, k=5), 
+                family =  gaussian())
+
+##### Get priors
+get_prior(temp_mod1, data = YSI_ma_temp) 
+ 
+temp_prior<- c(prior(normal(0, 5), class = "Intercept"),
+            prior(normal(0, 2), class = "b"))
+
+                          
+# temp_brm1 <- brm(temp_mod1,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               # init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+
+# pp_check(temp_brm1, ndraws = 100)
+# pp_check(temp_brm1,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm1) #0.83
+# temp_brm1
+
+# ###########################################################################################################################################
+### tried a log transform, but no improvement
+
+# 
+# #define model
+# temp_mod2 <- bf(logTemp ~  site + s(datetime_index, by = site,m=1,  k=5),
+#                 family =  gaussian())
+# 
+# ##### Get priors
+# get_prior(temp_mod2, data = data_new)
+# 
+# # temp_prior <- c(prior(normal(3.1, 1), class = "Intercept"),
+# #                 prior(normal(0, 1), class = "b"))
+# 
+# temp_prior<- c(prior(normal(0, 5), class = "Intercept"),
+#             prior(normal(0, 2), class = "b"))
+# 
+# 
+# temp_brm2 <- brm(temp_mod2,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               # init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+#  pp_check(temp_brm2, ndraws = 100)
+# pp_check(temp_brm2,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm2) #0.78
+
+# ###########################################################################################################################################
+# trying as a mixture model - did not converge at all
+##### Set priors
+
+# #define model
+# temp_mod3 <- bf(Temp_degC ~  site + s(datetime_index,by = site, m = 1, k=5), 
+#                 family =  mixture(gaussian, gaussian))
+# 
+# ##### Get priors
+# get_prior(temp_mod3, data = YSI_ma_temp) 
+#  
+# 
+# temp_prior<- c(prior(normal(29, 5), class = "Intercept", dpar = mu1),
+#                 prior(normal(31, 5), class = "Intercept", dpar = mu2))
+#            # prior(normal(0, 2), class = "sd"),
+#             # prior(normal(0, 2), class = "b"))
+# 
+#                           
+# temp_brm3 <- brm(temp_mod3,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(temp_brm3, ndraws = 100)
+# pp_check(temp_brm3,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm3)
+
+# ###########################################################################################################################################
+
+#define model
+temp_mod4 <- bf(Temp_degC ~  site + s(datetime_index, bs = "cr", k=20), 
+                family =  gaussian())
+
+##### Get priors
+get_prior(temp_mod1, data = YSI_ma_temp) 
+                          
+# temp_brm4 <- brm(temp_mod4,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(temp_brm4, ndraws = 100)
+# pp_check(temp_brm4,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm4) #0.89
+# temp_brm4
+# model_weights(temp_brm1, temp_brm4)# 4 is better
+# ###########################################################################################################################################
+
+#define model
+temp_mod5 <- bf(Temp_degC ~  site + s(datetime_index, bs = "cr", k=30), 
+                family =  gaussian())
+                          
+temp_brm5 <- brm(temp_mod5,
+               data = YSI_ma_temp,
+               prior = temp_prior,
+               cores = n_cores,
+               chains = n_chains,
+              init = "0",
+               iter = n_iter,
+               warmup = n_warmup)
+
+pp_check(temp_brm5, ndraws = 100)
+#pp_check(temp_brm4, ndraws = 100)
+pp_check(temp_brm5,type = "loo_pit_overlay", ndraws = 100)
+bayes_R2(temp_brm5) #0.91
+temp_brm5
+#model_weights(temp_brm5, temp_brm4)# 5 is better
+saveRDS(temp_brm5, "model outputs/temp_brm.rds")
+temp_brm5 <- readRDS("model outputs/temp_brm.rds")
+############################################################################################################################################
+
+#define model
+temp_mod6 <- bf(Temp_degC ~  site + s(datetime_index, bs = "cr", k=50), 
+                family =  gaussian())
+                          
+# temp_brm6 <- brm(temp_mod5,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(temp_brm6, ndraws = 100)
+# pp_check(temp_brm5, ndraws = 100)
+# pp_check(temp_brm6,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm6) #0.91
+# temp_brm6
+# model_weights(temp_brm5, temp_brm6)# 5 is  better
+
+############################################################################################################################################
+#define model
+temp_mod7 <- bf(Temp_degC ~  site + s(datetime_index, by = site, id = 1, k=30) , 
+                family =  gaussian())
+
+# temp_brm7 <- brm(temp_mod7,
+#                data = YSI_ma_temp,
+#                prior = temp_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(temp_brm7, ndraws = 100)
+# pp_check(temp_brm5, ndraws = 100)
+# pp_check(temp_brm7,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(temp_brm5) #0.91
+# temp_brm5
+# model_weights(temp_brm5, temp_brm7)# 5 is better
+############################################################################################################################################
+# get credible intervals of best model
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_temp <- temp_brm5 %>%
+ posterior_samples() %>%
+  melt()%>%
+  as_tibble() %>%
+  dplyr::select(contains(c('Temp_degC')))
+
+describe_posterior(temp_brm5, ci = 0.95)
+bayes_R2(temp_brm5)
+```
+
+## DO models - do_brm6 is the best model
+
+```{r}
+hist(YSI_ma$maDO_24)
+hist(log(YSI_ma$maDO_24))
+###########################################################################################################################################
+##### Set priors
+#define model
+do_mod1 <- bf(DOmgL ~  site + s(datetime_index,by = site, m = 1, k=5), 
+                family =  gaussian())
+
+##### Get priors
+get_prior(do_mod1, data = YSI_ma_do) 
+
+YSI_ma_do%>%
+  group_by(site)%>%
+  summarise(meanDO = mean(DOmgL))
+
+do_prior<- c(prior(normal(6, 1), class = "Intercept"),
+            prior(normal(0, 2), class = "b"))
+
+                          
+# do_brm1 <- brm(do_mod1,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               # init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm1, ndraws = 100)
+# pp_check(do_brm1,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm1) #0.13
+# do_brm1
+############################################################################################################################################
+
+#define model
+do_mod2 <- bf(DOmgL ~  site + s(datetime_index, bs = "cr", k=20), 
+                family =  gaussian())
+                          
+# do_brm2 <- brm(do_mod2,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm2, ndraws = 100)
+# pp_check(do_brm2,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm2) #0.23
+# do_brm2
+# model_weights(do_brm1, do_brm2)
+# 
+# saveRDS(do_brm2, "model outputs/DO_brm.rds")
+############################################################################################################################################
+#define model
+do_mod3 <- bf(DOmgL ~  site + s(datetime_index, bs = "cr", k=30), 
+                family =  gaussian())
+                          
+# do_brm3 <- brm(do_mod3,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm3, ndraws = 100)
+# pp_check(do_brm2, ndraws = 100)
+# pp_check(do_brm3,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm3) #0.24
+# do_brm3
+# model_weights(do_brm3, do_brm2)# 3 is better
+############################################################################################################################################
+#define model
+do_mod4 <- bf(DOmgL ~  site + s(datetime_index, bs = "cr", k=40), 
+                family =  gaussian())
+                          
+# do_brm4 <- brm(do_mod4,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm4, ndraws = 100)
+# pp_check(do_brm3, ndraws = 100)
+# pp_check(do_brm4,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm4) #0.26
+# do_brm4
+# model_weights(do_brm3, do_brm4)# 4 is better
+############################################################################################################################################
+#define model
+do_mod5 <- bf(DOmgL ~  site + s(datetime_index, bs = "cr", k=50), 
+                family =  gaussian())
+
+# do_brm5 <- brm(do_mod5,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm5, ndraws = 100)
+# pp_check(do_brm4, ndraws = 100)
+# pp_check(do_brm5,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm5) #0.27
+# do_brm5
+# model_weights(do_brm5, do_brm4)# 5 is better
+#############################################################################################################################
+#define model
+do_mod6 <- bf(DOmgL ~  site + s(datetime_index, bs = "cr", k=100), 
+                family =  gaussian())
+
+do_brm6 <- brm(do_mod6,
+               data = YSI_ma_do,
+               prior = do_prior,
+               cores = n_cores,
+               chains = n_chains,
+              init = "0",
+               iter = n_iter,
+               warmup = n_warmup)
+
+#pp_check(do_brm5, ndraws = 100)
+pp_check(do_brm6, ndraws = 100)
+pp_check(do_brm6,type = "loo_pit_overlay", ndraws = 100)
+bayes_R2(do_brm6) #0.29
+do_brm6
+#model_weights(do_brm5, do_brm6)# 6 is better
+
+saveRDS(do_brm6, "model outputs/DO_brm.rds")
+do_brm6 <- readRDS("model outputs/DO_brm.rds")
+#############################################################################################################################
+#define model
+do_mod7 <- bf(DOmgL ~  site , 
+                family =  gaussian())
+
+# do_brm7 <- brm(do_mod7,
+#                data = YSI_ma_do,
+#                prior = do_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#               #init = "0",
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(do_brm7, ndraws = 100)
+# pp_check(do_brm6, ndraws = 100)
+# pp_check(do_brm7,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(do_brm7) #0.29
+# do_brm7
+# model_weights(do_brm7, do_brm6)# with site is better
+#############################################################################################################################
+
+# get credible intervals of best model
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_do <- do_brm6 %>%
+ posterior_samples() %>%
+  melt()%>%
+  as_tibble() %>%
+  dplyr::select(contains(c('DOmgL')))
+
+describe_posterior(do_brm6, ci = 0.95)
+bayes_R2(do_brm6)
+############################################################################################################################################
+```
+
+
+# Turbidity, pH, Salinity, and and TDS plots
+
+```{r}
+
+ysiSumm%>%
+  group_by(site)%>%
+  na.omit()%>%
+  summarize(meanSal = mean(maSal_24))
+
+ysiSumm%>%
+  group_by(site)%>%
+  na.omit()%>%
+  summarize(meanTDS = mean(maTDS_24))
+
+ysiSumm%>%
+  group_by(site)%>%
+  na.omit()%>%
+  summarize(meanTurb = mean(maTurb_24))
+
+ysiSumm%>%
+  group_by(site)%>%
+  na.omit()%>%
+  summarize(meanpH = mean(mapH_24))
+
+
+# Plot 24-running average TURBIDITY over raw
+(bothSitesTurb_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = Turbmin, ymax = Turbmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maTurb_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "Turbidity") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(-2,10))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitesTurb_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitesTurb_simp.svg", plot = bothSitesTurb_simp, width = 8, height = 6)
+
+ggsave(file = "fig/bothSitesTurb_simp.pdf", plot = bothSitesTurb_simp, width = 8, height = 6)
+
+
+# Plot 24-running average TDS over raw
+(bothSitesTDS_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = TDSMin, ymax = TDSMax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maTDS_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "TDS") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(34000,37000))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitesTDS_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitesTDS_simp.svg", plot = bothSitesTDS_simp, width = 8, height = 6)
+
+ggsave(file = "fig/bothSitesTDS_simp.pdf", plot = bothSitesTDS_simp, width = 8, height = 6)
+
+# Plot 24-running average pH over raw
+(bothSitespH_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = pHmin, ymax = pHmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = mapH_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "pH") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(7.9,8.4))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitespH_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitespH_simp.svg", plot = bothSitespH_simp, width = 8, height = 6)
+
+ggsave(file = "fig/bothSitespH_simp.pdf", plot = bothSitespH_simp, width = 8, height = 6)
+
+
+# Plot 24-running average Salinity over raw
+(bothSitesSal_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = Sal_PSUmin, ymax = Sal_PSUmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maSal_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "Salinity (psu)") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(34,38))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+ 
+bothSitesSal_simp # Print plot
+
+### save plot with specified parameters directly to a specific file path
+ggsave(file = "fig/bothSitesSal_simp.svg", plot = bothSitesSal_simp, width = 8, height = 6)
+
+ggsave(file = "fig/bothSitesSal_simp.pdf", plot = bothSitesSal_simp, width = 8, height = 6)
+```
+
