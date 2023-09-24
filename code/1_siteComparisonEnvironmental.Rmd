@@ -285,7 +285,7 @@ ggsave(file = "fig/bothSitesDO_simp.svg", plot = bothSitesDO_simp, width = 8, he
 ggsave(file = "fig/bothSitesDO_simp.pdf", plot = bothSitesDO_simp, width = 8, height = 6)
 ``` 
 
-## Bayesian models of environmental data
+# Bayesian models of environmental data
 
 ## First, set instructions for sampler
 
@@ -427,6 +427,8 @@ temp_brm5 <- brm(temp_mod5,
               init = "0",
                iter = n_iter,
                warmup = n_warmup)
+saveRDS(temp_brm5, "model outputs/temp_brm.rds")
+temp_brm5 <- readRDS("model outputs/temp_brm.rds")
 
 pp_check(temp_brm5, ndraws = 100)
 #pp_check(temp_brm4, ndraws = 100)
@@ -434,8 +436,7 @@ pp_check(temp_brm5,type = "loo_pit_overlay", ndraws = 100)
 bayes_R2(temp_brm5) #0.91
 temp_brm5
 #model_weights(temp_brm5, temp_brm4)# 5 is better
-saveRDS(temp_brm5, "model outputs/temp_brm.rds")
-temp_brm5 <- readRDS("model outputs/temp_brm.rds")
+
 ############################################################################################################################################
 
 #define model
@@ -491,7 +492,7 @@ describe_posterior(temp_brm5, ci = 0.95)
 bayes_R2(temp_brm5)
 ```
 
-## DO models - do_brm6 is the best model
+# DO models - do_brm6 is the best model
 
 ```{r}
 hist(YSI_ma$maDO_24)
@@ -622,15 +623,16 @@ do_brm6 <- brm(do_mod6,
                iter = n_iter,
                warmup = n_warmup)
 
+saveRDS(do_brm6, "model outputs/DO_brm.rds")
+do_brm6 <- readRDS("model outputs/DO_brm.rds")
 #pp_check(do_brm5, ndraws = 100)
 pp_check(do_brm6, ndraws = 100)
 pp_check(do_brm6,type = "loo_pit_overlay", ndraws = 100)
-bayes_R2(do_brm6) #0.29
+bayes_R2(do_brm6) #0.23
 do_brm6
 #model_weights(do_brm5, do_brm6)# 6 is better
 
-saveRDS(do_brm6, "model outputs/DO_brm.rds")
-do_brm6 <- readRDS("model outputs/DO_brm.rds")
+
 #############################################################################################################################
 #define model
 do_mod7 <- bf(DOmgL ~  site , 
