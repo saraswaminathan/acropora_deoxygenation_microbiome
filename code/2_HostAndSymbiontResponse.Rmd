@@ -1,0 +1,1370 @@
+---
+title: "2_HostAndSymbiontResponse"
+author: "Sara Devi Swaminathan"
+date: "`r Sys.Date()`"
+output: html_document
+toc: true
+toc_float: true
+number_sections: true
+---
+# Table of Contents {#table-of-contents}
+
+## Setup: working directory and packages
+
+Load libraries and set working directory
+
+```{r setup}
+#Load necessary libraries
+library(rcompanion) #plotting histograms
+library(car)  #qqplot
+library(emmeans)
+library(readxl)
+library(splitstackshape)
+library(lubridate)
+library(glmmTMB)
+library(tidyverse)
+library(brms)
+library(parallel)
+library(ggmcmc)
+library(bayestestR)
+library(tidybayes)
+library(reshape)
+library(forcats)
+library(bayesplot)
+```
+
+
+## set colors for plotting
+```{r}
+mytheme <- theme_classic() + 
+  theme(text = element_text(size=15)) +
+  theme(axis.text.x = element_text(size=15,colour="black"), 
+        axis.text.y =   element_text(size=15,colour="black")) +
+  theme(plot.margin = unit(c(5.5,5.5,5.5,15), "pt")) +
+  theme(panel.border = element_rect(colour = "black", 
+                                    fill=NA,size=1)) +
+  theme(axis.line = element_line(size = 0))
+plot.col.treat<-c("0.5" = "#F18D34", "2" = "#F5C75D", "4" =  "#E5EF99", "6" =  "#A5DEDE")
+```
+
+
+# Load data and format
+
+## all non-microbial response variables 
+```{r}
+# all non-microbial response variables stored in Acer2_forR/xlsx
+physData<-read_xlsx("data/Acer2_forR.xlsx") %>%
+cSplit("Date","-")%>% #break apart date based on the slash
+dplyr::rename(Year=Date_1, Month=Date_2, Day=Date_3) %>% #rename split columns Month, Day, and Year
+mutate(Date = as.Date(mdy(paste(Month,Day,Year)))) %>%
+  mutate(DayID = as.factor(ifelse(Day %in% c(16, 17, 18), 1, 
+                        ifelse(Day==19, 2,
+                               ifelse(Day==20, 3,
+                                      ifelse(Day== 21, 4, 
+                                           ifelse(Day==22, 5, NA))))))) %>%
+  mutate(trtNumeric = as.numeric(Treatment), 
+         Treatment = factor(Treatment, levels = c("6", "4", "2", "0.5")), # This order so that the "intercept level is normoxia (6.0)
+         trtReverseOrder = factor(Treatment, levels = c("0.5", "2", "4", "6")), #reverse order for plotting
+         Geno = factor(Genotype, order = FALSE), 
+         Tank = factor(Tank, order = FALSE), 
+         FragIDUnique = factor(FragIDUnique, order = FALSE),
+         origin_site = ifelse(origin_site == "MUN", "inshore", "offshore"),
+        origin_site=factor(origin_site, levels = c("offshore", "inshore")), 
+        timepoint = as.factor(timepoint), 
+        YII_PAM = as.numeric(YII_PAM), 
+        F0_PAM = as.numeric(F0_PAM))
+```
+
+## for PAM data visualization and models
+```{r}
+########################PAM DATAFRAMES
+PAM <-  physData%>%
+  mutate(YII_PAM = ifelse(notes %in% c("removed"), NA, YII_PAM), # column called YII_PAM has NAs if frag died
+F0_PAM = ifelse(notes %in% c("removed"), NA, F0_PAM))%>% # column called YII_PAM has NAs when frag was no longer in experiment
+  filter(F0_PAM >= 200) #filter PAM data just to valid readings (>200 F0)
+
+#split into two PAM timepoint datasets that will be analyzed separately
+#dawn timepoint
+dawn<-PAM%>%
+  filter(timepoint=="dawn")
+```
+
+## for tissue retention visualization and models
+```{r}
+########################TISSUE LOSS DATAFRAME
+TL<-physData %>%
+  filter(timepoint=="peak") %>% # tissue loss was only recorded at the peak timepoint
+  mutate(propTissueRemaining = 1-propTL)%>% 
+  mutate(presenceTL=ifelse(propTL > 0, 1, 0))
+
+TL_prevDay <- TL %>%
+  select(FragIDUnique, Day, Tank, DayID, origin_site, Geno, trtNumeric, propTL)%>%
+  arrange(FragIDUnique)%>%
+  group_by(FragIDUnique)%>%
+  mutate(previousDay = lag(propTL, order_by = Day))%>%
+  arrange(FragIDUnique, Day)%>%
+  filter(!Day == 16)%>%
+  mutate(logitPrevDay = logit(previousDay))
+
+TL_prevDayTR <- TL %>%
+  select(FragIDUnique, Day, Tank, DayID, origin_site, Geno, trtNumeric, propTissueRemaining)%>%
+  arrange(FragIDUnique)%>%
+  group_by(FragIDUnique)%>%
+  mutate(previousDay = lag(propTissueRemaining, order_by = Day))%>%
+  arrange(FragIDUnique, Day)%>%
+  filter(!Day == 16)%>%
+  mutate(logitPrevDay = logit(previousDay))
+```
+
+## for Symbiodiniaceae data visualization and models
+```{r}
+########################ZOOX DATAFRAMES
+zoox<-physData %>%
+  filter(timepoint == "peak") %>%
+  filter(DayID == 5)%>%
+  mutate(SA = ifelse(SA==0,.00001, SA), # so we don't divide by 0 and get NaN. 0s are in place for corals that died before experiment ended and were not blasted
+         zooxInteger = as.integer(Zoox),
+         zooxTotal = Zoox*SA,
+         propTissueRemaining = 1-propTL,
+        zooxNorm = zooxTotal*propTissueRemaining)
+
+zooxNoDead <- zoox%>%
+  filter(Zoox>0)
+```
+
+
+## for survivorship data visualization and models
+```{r}
+#######################SURVIVORSHIP DATAFRAMES
+
+Surv <- TL%>%
+  mutate(surv = ifelse(propTL==1, 0, 1),
+         mort = ifelse(surv == 1,0,1))
+```
+
+##  Data visualization 
+- Make custom theme for all plots
+
+```{r}
+mytheme <- theme_classic() + 
+  theme(text = element_text(size=15)) +
+  theme(axis.text.x = element_text(size=15,colour="black"), 
+        axis.text.y =   element_text(size=15,colour="black")) +
+  theme(plot.margin = unit(c(5.5,5.5,5.5,15), "pt")) +
+  theme(panel.border = element_rect(colour = "black", 
+                                    fill=NA,size=1)) +
+  theme(axis.line = element_line(size = 0))
+
+### Set color palette 
+#plot.col.treat<-c("0.5" = "#AD0606", "2" = "#CA8F08", "4" =  "#A4CE30", "6" =  "#A9E0A3")
+plot.col.treat<-c("0.5" = "#F18D34", "2" = "#F5C75D", "4" =  "#E5EF99", "6" =  "#A5DEDE")
+```
+
+##  Set instructions for sampler
+
+```{r}
+n_cores <- detectCores() # this will determine how many cores your computer has so that it can use all of its processing power
+n_chains <- 2 
+n_iter <- 4000
+n_warmup <- 2000
+```
+
+
+# I. PAM Data
+- Dates of experiment: 10/19/2019- 10/22/2019
+- AMBIENT measurements taken 17th and 18th
+
+## PAM figures
+
+```{r} 
+### both sites - points and line graph
+(dawnPamPlot08May23 <- dawn%>%
+  ggplot(aes(color=Treatment))+ 
+  geom_jitter(aes(x=DayID, y=YII_PAM), alpha = 0.9, width = 0.15)+
+  geom_smooth(aes(x=DayID,y = YII_PAM,fill = Treatment,group = interaction(Treatment, origin_site)), method = "lm", alpha = 0.4)+
+  mytheme+ 
+  ylim(0.45,0.7)+
+  labs(x="Day",y='Maximum Quantum Yield')+ 
+  #ggtitle("Quantum Yield excluding 0's for already dead frags")+
+  #theme(axis.text.x = element_text(size=10,colour="black", angle=45, hjust=1)) + 
+  scale_colour_manual(values = plot.col.treat) + 
+  scale_fill_manual(values = plot.col.treat) +
+    mytheme+
+  facet_wrap(~ origin_site))
+ggsave(file = "fig/dawnPamPlot08May23.svg", plot = dawnPamPlot08May23, width = 7, height = 5)
+
+### dawn, both sites together in one panel bc of no significance of site
+(dawnPamPlot_noFacet <- dawn%>%
+  ggplot(aes(color=Treatment))+ 
+  geom_jitter(aes(x=DayID, y=YII_PAM), alpha = 0.9, width = 0.15)+
+  geom_smooth(aes(x=DayID,y = YII_PAM,fill = Treatment,group = Treatment), method = "lm", alpha = 0.4)+
+  mytheme+ 
+  ylim(0.45,0.7)+
+  labs(x="Day",y='Maximum Quantum Yield')+ 
+  #ggtitle("Quantum Yield excluding 0's for already dead frags")+
+  #theme(axis.text.x = element_text(size=10,colour="black", angle=45, hjust=1)) + 
+  scale_colour_manual(values = plot.col.treat) + 
+  scale_fill_manual(values = plot.col.treat) +
+  mytheme)
+
+ggsave(file = "fig/dawnPamPlot13May23.svg", plot = dawnPamPlot_noFacet, width = 7, height = 5)
+
+```
+
+
+Use the raw data for analysis, but subset to remove ambient treatment (which is the initial measurement before the start of experiment), and then subset dawn and peak measurements to conduct separate analyses for each time point
+
+## Visualize relationships
+
+```{r}
+hist(dawn$YII_PAM) # use beta distribution 
+# plot relationships
+
+dawn%>%
+  ggplot(aes(x = DayID, y = YII_PAM, color = Treatment))+
+  geom_smooth(aes(group = Treatment),method = "lm")+
+  facet_wrap(~origin_site)
+
+dawn%>%
+  ggplot(aes(x = Day, y = YII_PAM, color = origin_site))+
+  geom_smooth( method = "lm")+
+  facet_wrap(~Treatment)
+```
+
+## PAM bayesian models
+### fixed effect = treatment random effect = day, FragID
+```{r}
+
+#Model that makes the most sense and tests our hypotheses
+# Response is a proportion and does not include dead corals
+# Day and FragIDUnique are random effects
+# Day is an integer and FragID is a factor
+# effect treatment is allowed to vary slope by day
+# phi term mirrors model
+pamDawn_mod <- bf(YII_PAM ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    phi ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+
+##### Get priors
+
+get_prior(pamDawn_mod, data = dawn) 
+
+##### Set priors
+pamDawn_mean <- dawn %>%
+  dplyr::group_by(Day) %>%
+  dplyr::summarize(meanYield = mean(YII_PAM)) %>%
+  mutate(logitMeanYield = logit(meanYield))
+
+print(paste("The logit-transformed propSusc intercept is", round(pamDawn_mean[1,3], 2)))
+# "The logit-transformed pamDawn intercept is 0.8"
+
+pamDawn_prior <- c(prior(normal(0.8, 1), class = "Intercept"),
+                prior(normal(0, 1), class = "b"),
+                prior(exponential(2), class = "sd"))
+                          
+# pamDawn_brm <- brm(pamDawn_mod,
+#                data = dawn,
+#                prior = pamDawn_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(pamDawn_brm, ndraws = 100)
+# pp_check(pamDawn_brm,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(pamDawn_brm) #0.43
+```
+
+
+### fixed effects: treatment, site random effects: day, FragID
+```{r}
+#adding site (worse)
+pamDawn_mod2 <- bf(YII_PAM ~ 1  + trtNumeric +  origin_site + (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    phi ~ 1  + trtNumeric + origin_site + (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+
+                          
+# pamDawn_brm2 <- brm(pamDawn_mod2,
+#                data = dawn,
+#                prior = pamDawn_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(pamDawn_brm2, ndraws = 100)
+# pp_check(pamDawn_brm2,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(pamDawn_brm2) #0.43
+# 
+# model_weights(pamDawn_brm, pamDawn_brm2, weights = "WAIC")
+```
+
+
+### fixed effects: treatment, site, treatment*site random effects: day, FragID
+
+```{r}
+#adding interaction of site (worse)
+
+pamDawn_mod3 <- bf(YII_PAM ~ 1  + trtNumeric +  origin_site + trtNumeric*origin_site + (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    phi ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + (1 + trtNumeric|Day) + (1|FragIDUnique) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+# pamDawn_brm3 <- brm(pamDawn_mod3,
+#                data = dawn,
+#                prior = pamDawn_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# pp_check(pamDawn_brm3, ndraws = 100)
+# pp_check(pamDawn_brm3,type = "loo_pit_overlay", ndraws = 100)
+# bayes_R2(pamDawn_brm3) #0.43
+# 
+# model_weights(pamDawn_brm3, pamDawn_brm, weights = "WAIC")
+```
+
+### fixed effects: treatment, random effects: day, FragID, genotype
+```{r}
+#adding genotype (worse)
+pamDawn_mod4 <- bf(YII_PAM ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) + (1|Geno) , 
+                    phi ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) + (1|Geno) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+
+pamDawn_brm4 <- brm(pamDawn_mod4,
+               data = dawn,
+               prior = pamDawn_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               warmup = n_warmup)
+
+pp_check(pamDawn_mod4, ndraws = 100)
+pp_check(pamDawn_mod4,type = "loo_pit_overlay", ndraws = 100)
+
+model_weights(pamDawn_mod4, pamDawn_brm)
+bayes_R2(pamDawn_brm22) #0.43
+```
+
+### fixed effects: treatment, random effects: day, FragID, tank. trying without nesting term
+```{r}
+##################################################################################################################
+#adding tank 
+pamDawn_mod5 <- bf(YII_PAM ~ 1  + trtNumeric +  (1|Day) + (1|FragIDUnique) + (1|Tank) , 
+                    phi ~ 1  + trtNumeric +  (1 |Day) + (1|FragIDUnique) + (1|Tank) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+
+pamDawn_brm5 <- brm(pamDawn_mod5,
+               data = dawn,
+               prior = pamDawn_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               warmup = n_warmup)
+pamDawn_brm5
+pp_check(pamDawn_brm5, ndraws = 100)
+pp_check(pamDawn_brm5,type = "loo_pit_overlay", ndraws = 100)
+
+model_weights(pamDawn_brm5, pamDawn_brm4)
+bayes_R2(pamDawn_brm24) #0.44
+```
+
+### best model: fixed effects: treatment, random effects: day, FragID, tank
+```{r}
+##################################################################################################################
+#adding tank 
+pamDawn_mod6 <- bf(YII_PAM ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) + (1|Tank) , 
+                    phi ~ 1  + trtNumeric +  (1 + trtNumeric|Day) + (1|FragIDUnique) + (1|Tank) , 
+                    family =  Beta(link = "logit", link_phi = "log"))
+                          
+pamDawn_brm6 <- brm(pamDawn_mod6,
+               data = dawn,
+               prior = pamDawn_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               warmup = n_warmup)
+pamDawn_brm6
+#saveRDS(pamDawn_brm6, "model outputs/pamDawn_brm6.RDS")
+pamDawn_brm6<-readRDS("model outputs/pamDawn_brm6.RDS")
+pp_check(pamDawn_brm6, ndraws = 100)
+pp_check(pamDawn_brm6,type = "loo_pit_overlay", ndraws = 100)
+
+model_weights(pamDawn_brm6, pamDawn_brm)
+bayes_R2(pamDawn_brm6) #0.44
+```
+
+## Posterior plots
+
+```{r}
+# standardized effect size estimates
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_pam <- pamDawn_brm6 %>%
+ posterior_samples()%>%
+  dplyr::select(-contains(c('cor', 'phi', 'sd', 'FragIDUnique', 'lp', 'Tank', 'Intercept', 'Day'))) %>%
+  melt()%>%
+  as_tibble()
+colnames(posterior_draws_pam) <- c("effect", "effect_estimate")
+
+(pamPosterior<- posterior_draws_pam %>%
+  ggplot(aes(x = effect_estimate, y = effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate")+
+  coord_cartesian(xlim = c(-0.1, 0.1)) )
+
+```
+
+## getting info for table
+```{r}
+pamTable<- describe_posterior(pamDawn_brm6, ci = 0.65)
+describe_posterior(pamDawn_brm6, ci = 0.95)
+pamTable
+```
+
+# II.  Symbiodiniaceae 
+
+## Symbiodiniaceae figures
+
+```{r,message=FALSE}
+hist(zooxNoDead$zooxNorm)
+
+#### Zoox NORMALIZED BOX plot by site 
+(acerZooxBoxplotNorm <- ggplot(zooxNoDead,aes(x=trtReverseOrder,y=zooxNorm,color=trtReverseOrder,group=trtReverseOrder, fill=trtReverseOrder))+ 
+  geom_boxplot(aes(y=zooxNorm,x = trtReverseOrder), alpha = 0.8)+ 
+  labs(x="Oxygen treatment",y='Symbiodinaceae density')+
+  scale_colour_manual(values = plot.col.treat)+
+  scale_fill_manual(values = plot.col.treat)+ 
+  facet_wrap(~origin_site)+
+    mytheme)
+
+ggsave(file = "fig/acerZooxBoxplotNorm08May23.svg", plot = acerZooxBoxplotNorm, width = 7, height = 5)
+
+(acerZooxBoxplotNorm_noFacet <- ggplot(zooxNoDead,aes(x=trtReverseOrder,y=zooxNorm,color=trtReverseOrder,group=trtReverseOrder, fill=trtReverseOrder))+ 
+  geom_boxplot(aes(y=zooxNorm,x = trtReverseOrder), alpha = 0.8)+ 
+  labs(x="Oxygen treatment",y='Symbiodinaceae density')+
+  scale_colour_manual(values = plot.col.treat)+
+  scale_fill_manual(values = plot.col.treat)+ 
+    mytheme)
+
+```
+
+## zoox bayesian models
+
+### fixed effects: treatment, random effects: Geno, tank
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+# Response is a numeric variable, normalized to surface area of living tissue and does not include dead corals
+# Day and FragIDUnique are random effects
+# Day is an integer and FragID is a factor
+# effect treatment is allowed to vary slope by day
+# phi term mirrors model
+
+zoox_mod <- bf(zooxNorm ~ 1  + trtNumeric  + (1 |Geno) + (1 |Tank), 
+               shape ~  1  + trtNumeric  + (1 |Geno) + (1 |Tank), 
+               family = Gamma(link = "log"))
+
+##### Set priors
+zoox_mean <-  zooxNoDead %>%
+  dplyr::group_by(Geno) %>%
+  dplyr::summarize(logmeanZoox = log(mean(zooxNorm)))
+
+
+print(paste("The logit-transformed zoox intercept is", round(zoox_mean[1,2], 2)))
+# "The logit-transformed pamDawn intercept is 17.3"
+
+
+zoox_prior <- c(prior(normal(17.3, 1), class = "Intercept"),
+                prior(normal(0, 1), class = "b"),
+                prior(exponential(2), class = "sd"))
+                          
+# zoox_brm <- brm(zoox_mod,
+#                data = zooxNoDead,
+#                prior = zoox_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                init = "0",
+#         #control = list(adapt_delta = 0.9),
+#                iter = n_iter,
+#                warmup = n_warmup)
+
+# zoox_brm
+# pp_check(zoox_brm, ndraws = 100)
+# pp_check(zoox_brm, type = "loo_pit_overlay", ndraws = 100)
+# 
+# bayes_R2(zoox_brm) #0.23
+# WAIC(zoox_brm) #3598.9
+```
+
+### fixed effects: treatment, site random effects: Geno, tank
+```{r}
+##################################################################################################################
+#adding site (better)
+
+zoox_mod2 <- bf(zooxNorm ~ 1  + trtNumeric  + origin_site + (1 |Geno) + (1 |Tank), 
+               shape ~  1  + trtNumeric  + origin_site + (1 |Geno) + (1 |Tank), 
+               family = Gamma(link = "log"))
+                          
+# zoox_brm2 <- brm(zoox_mod2,
+#                data = zooxNoDead,
+#                prior = zoox_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                init = "0",
+#         #control = list(adapt_delta = 0.9),
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# zoox_brm2
+# pp_check(zoox_brm2, ndraws = 100)
+# pp_check(zoox_brm2, type = "loo_pit_overlay", ndraws = 100)
+# 
+# model_weights(zoox_brm2, zoox_brm, weights = "WAIC") # better with site
+# bayes_R2(zoox_brm2) #0.23
+```
+
+### fixed effects: treatment, site, treatment*site random effects: Geno, tank
+```{r}
+##################################################################################################################
+#adding interaction of site and treatment
+
+zoox_mod3 <- bf(zooxNorm ~ 1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1|Geno) + (1|Tank), 
+               shape ~  1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1|Geno) + (1|Tank), 
+               family = Gamma(link = "log"))
+                          
+# zoox_brm3 <- brm(zoox_mod3,
+#                data = zooxNoDead,
+#                prior = zoox_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                init = "0",
+#         #control = list(adapt_delta = 0.9),
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# zoox_brm3
+# pp_check(zoox_brm3, ndraws = 100)
+# pp_check(zoox_brm3, type = "loo_pit_overlay", ndraws = 100)
+# 
+# model_weights(zoox_brm2, zoox_brm3, weights = "WAIC") # better with site interaction
+# bayes_R2(zoox_brm3) #0.27
+
+```
+
+### fixed effects: treatment, site, treatment*site random effects: treatment|Geno, tank
+```{r}
+##################################################################################################################
+#adding interaction of site and treatment
+
+zoox_mod4 <- bf(zooxNorm ~ 1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1 + trtNumeric|Geno) + (1|Tank), 
+               shape ~  1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1+ trtNumeric|Geno) + (1|Tank), 
+               family = Gamma(link = "log"))
+                          
+# zoox_brm4 <- brm(zoox_mod4,
+#                data = zooxNoDead,
+#                prior = zoox_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                init = "0",
+#         #control = list(adapt_delta = 0.9),
+#                iter = n_iter,
+#                warmup = n_warmup)
+# 
+# zoox_brm4
+# pp_check(zoox_brm4, ndraws = 100)
+# pp_check(zoox_brm4, type = "loo_pit_overlay", ndraws = 100)
+# 
+# model_weights(zoox_brm4, zoox_brm3, weights = "WAIC") # better when treatment varies by genotype
+# bayes_R2(zoox_brm4) #0.24
+
+```
+
+### best model: fixed effects: treatment, site, treatment*site random effects: treatment|Geno, treatment|tank
+```{r}
+##################################################################################################################
+#adding interaction of site and treatment
+
+zoox_mod5 <- bf(zooxNorm ~ 1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1 + trtNumeric|Geno) + (1+trtNumeric|Tank), 
+               shape ~  1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1+ trtNumeric|Geno) + (1+trtNumeric|Tank), 
+               family = Gamma(link = "log"))
+                          
+zoox_brm5 <- brm(zoox_mod5,
+               data = zooxNoDead,
+               prior = zoox_prior,
+               cores = n_cores,
+               chains = n_chains,
+               init = "0",
+        control = list(adapt_delta = 0.9),
+               iter = n_iter,
+               warmup = n_warmup)
+
+zoox_brm5
+#saveRDS(zoox_brm5, "model outputs/zoox_brm5.RDS")
+zoox_brm5<-readRDS("model outputs/zoox_brm5.RDS")
+pp_check(zoox_brm5, ndraws = 100)
+pp_check(zoox_brm5, type = "loo_pit_overlay", ndraws = 100) # USE THE PCC ONE INSTEAD
+
+#model_weights(zoox_brm5, zoox_brm4, weights = "WAIC") # better when treatment varies by genotype
+bayes_R2(zoox_brm15) #0.25
+```
+
+
+## posterior plots to compare effect sizes
+```{r}
+# standardized effect size estimates
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_zoox <- zoox_brm5 %>%
+ posterior_samples()%>%
+  dplyr::select(-contains(c('cor', 'phi', 'sd', 'lp', 'shape', 'Geno', 'Tank', 'Intercept'))) %>%
+  melt()%>%
+  as_tibble()
+colnames(posterior_draws_zoox) <- c("effect", "effect_estimate")
+table(posterior_draws_zoox$effect)
+#write_csv(posterior_draws_zoox, "data/posterior_draws_zoox.csv") #renaming effects
+#posterior_draws_zoox<- read_csv("data/posterior_draws_zoox_renamedColumns.csv")
+
+posterior_draws_zoox_plot<- posterior_draws_zoox %>%
+ mutate(effect = fct_reorder(effect, effect_estimate)) %>%
+  ggplot(aes(x = effect_estimate, y = effect)) +
+  stat_halfeye(alpha = 0.5)+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  ylab("") +
+  mytheme+
+  xlab("Posterior estimate")
+
+posterior_draws_zoox_plot
+
+ggsave(file = "fig/posterior_draws_zoox_plot.svg", plot = posterior_draws_zoox_plot, width = 7, height = 5)
+```
+
+## get info for table
+
+```{r}
+zooxTable<- describe_posterior(zoox_brm5, ci = .65)
+describe_posterior(zoox_brm5, ci = .95)
+zooxTable
+```
+
+
+# III. Tissue loss data
+
+## Figure for % frag surface area TL figures (from visual inspection)
++ treatment alone
++ site and treatment
++ site, treatment, and genotype
+
+```{r}
+# % fragment tissue loss by treatment and origin site
+(TLplot <-TL%>%
+ggplot(aes(x = Day, y = propTissueRemaining)) + 
+    ylab("% tissue remaining") + 
+    xlab("Day") +
+    geom_jitter(aes(color = Treatment),  alpha = 0.9, width = 0.15)+
+geom_smooth(aes(color = Treatment, fill = Treatment), method = "lm")+
+   scale_fill_manual(values = plot.col.treat) + 
+    coord_cartesian(ylim=c(0,1))+
+   scale_color_manual(values = plot.col.treat) + 
+   facet_wrap(facets = ~origin_site)+ 
+   mytheme)
+
+ggsave(file = "fig/TLplot.svg", plot = TLplot08May23, width = 7, height = 5)
+
+```
+
+## Tissue retention models
+
+### fixed effects: treatment, random effects: Day, logitPrevDay
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod <- bf(propTissueRemaining ~ 1  + trtNumeric + (1|logitPrevDay) +
+                (1|Day),
+              phi ~ 1  + trtNumeric + (1|logitPrevDay) +
+                (1|Day),
+              zoi ~1  + trtNumeric + (1|logitPrevDay) +
+                (1|Day),
+              coi ~ 1  + trtNumeric + (1|logitPrevDay) +
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+get_prior(zoibTL_mod, data = TL)
+
+##### Set priors
+TR_mean <- TL_prevDayTR %>%
+  filter(!is.na(propTissueRemaining))%>%
+  dplyr::group_by(Day) %>%
+  dplyr::summarize(meanTR = mean(propTissueRemaining)) %>%
+  mutate(logitmeanTR = logit(meanTR))
+
+
+print(paste("The logit-transformed TR intercept is", round(TR_mean[1,3], 2)))
+# "The logit-transformed TL intercept is -4.73"
+
+zoibTR_prior<- c(prior(normal(-4.7, 1), class = "Intercept"),
+               prior(normal(0, 1), class = "b"),
+              #prior(lkj(2), class = "cor"),
+               #prior(logistic(0, 1), class = "Intercept", dpar = "zoi"),
+               prior(normal(0, 1), class = "b", dpar = "zoi"),
+               prior(exponential(1), class = "sd", dpar = "zoi"),
+               #prior(logistic(0, 1), class = "Intercept", dpar = "coi"),
+               prior(normal(0, 1), class = "b", dpar = "coi"),
+               prior(exponential(1), class = "sd", dpar = "coi"),
+               prior(normal(0, 1), class = "Intercept", dpar = "phi"),
+               prior(normal(0, 1), class = "b", dpar = "phi"),
+               prior(normal(0, 1), class = "sd", dpar = "phi"),
+               prior(exponential(1), class = "sd"))
+
+# zoibTL_brm <- brm(zoibTL_mod,
+#                data = TL_prevDayTR,
+#                prior = zoibTL_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# bayes_R2(zoibTL_brm) #.69
+# pp_check(zoibTL_brm, type = "dens_overlay",ndraws = 100)
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(zoibTL_brm)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+```
+
+
+### fixed effects: treatment, random effects: Day, previousDay - better with logit-transformed prevDay!!
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the datapoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod2 <- bf(propTissueRemaining ~ 1  + trtNumeric + (1|previousDay) +
+                (1|Day),
+              phi ~ 1  + trtNumeric + (1|previousDay) +
+                (1|Day),
+              zoi ~1  + trtNumeric + (1|previousDay) +
+                (1|Day),
+              coi ~ 1  + trtNumeric + (1|previousDay) +
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+# zoibTL_brm2 <- brm(zoibTL_mod2,
+#                data = TL_prevDayTR,
+#                prior = zoibTL_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# bayes_R2(zoibTL_brm2) #.21
+# pp_check(zoibTL_brm, type = "loo_pit_overlay",ndraws = 100)
+# model_weights(zoibTL_brm, zoibTL_brm2)
+```
+
+
+### fixed effects: treatment, random effects: Day, logitPrevDay, Genotype
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod3 <- bf(propTissueRemaining ~ 1  + trtNumeric + (1|logitPrevDay) +  (1|Geno) + 
+                (1|Day),
+              phi ~ 1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + 
+                (1|Day),
+              zoi ~1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + 
+                (1|Day),
+              coi ~ 1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + 
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+# zoibTL_brm3 <- brm(zoibTL_mod3,
+#                data = TL_prevDayTR,
+#                prior = zoibTL_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# bayes_R2(zoibTL_brm3) #.69
+# pp_check(zoibTL_brm3, type = "dens_overlay",ndraws = 100)
+# pp_check(zoibTL_brm3, type = "loo_pit_overlay", ndraws = 100)
+# model_weights(zoibTL_brm, zoibTL_brm3) # This is better
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(zoibTL_brm3)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+```
+
+### fixed effects: treatment, random effects: Day, logitPrevDay, Genotype, Tank
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod4 <- bf(propTissueRemaining ~ 1  + trtNumeric + (1|logitPrevDay) +  (1|Geno) + (1|Tank) + 
+                (1|Day),
+              phi ~ 1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              zoi ~1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              coi ~ 1  + trtNumeric + (1|logitPrevDay) + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+# zoibTL_brm4 <- brm(zoibTL_mod4,
+#                data = TL_prevDayTR,
+#                prior = zoibTL_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# bayes_R2(zoibTL_brm4) #.72
+# pp_check(zoibTL_brm4, type = "dens_overlay",ndraws = 100)
+# pp_check(zoibTL_brm4, type = "loo_pit_overlay", ndraws = 100)
+# model_weights(zoibTL_brm4, zoibTL_brm3) # This is better
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(zoibTL_brm4)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+```
+
+### fixed effects: treatment, site, random effects: Day, logitPrevDay, Genotype, Tank
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod5 <- bf(propTissueRemaining ~ 1  + trtNumeric + origin_site + logitPrevDay +  (1|Geno) + (1|Tank) + 
+                (1|Day),
+              phi ~ 1  + trtNumeric + origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              zoi ~1  + trtNumeric + origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              coi ~ 1  + trtNumeric + origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+get_prior(zoibTL_mod, data = TL)
+
+# zoibTL_brm5 <- brm(zoibTL_mod5,
+#                data = TL_prevDayTR,
+#                prior = zoibTL_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# bayes_R2(zoibTL_brm5) #.72
+# pp_check(zoibTL_brm5, type = "dens_overlay",ndraws = 100)
+# pp_check(zoibTL_brm5, type = "loo_pit_overlay", ndraws = 100)
+# model_weights(zoibTL_brm4, zoibTL_brm5) # This is better
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(zoibTL_brm5)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+```
+
+
+### fixed effects: treatment, site, site*treatment, random effects: Day, logitPrevDay, Genotype, Tank
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTL_mod6 <- bf(propTissueRemaining ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay +  (1|Geno) + (1|Tank) + 
+                (1|Day),
+              phi ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              zoi ~1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              coi ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+zoibTL_brm6 <- brm(zoibTL_mod6,
+               data = TL_prevDayTR,
+               prior = zoibTL_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               init = "0",
+               warmup = n_warmup)
+
+bayes_R2(zoibTL_brm6) #.74
+pp_check(zoibTL_brm6, type = "dens_overlay",ndraws = 100)
+pp_check(zoibTL_brm6, type = "loo_pit_overlay", ndraws = 100)
+model_weights(zoibTL_brm6, zoibTL_brm5) # This is better
+
+#saveRDS(zoibTL_brm6, "model outputs/zoibTL_brm6.RDS")
+zoibTL_brm6<-readRDS("model outputs/zoibTL_brm6.RDS")
+############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+y <- posterior_predict(zoibTL_brm6)*100
+yrep_int <- sapply(data.frame(y), as.integer)
+y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+ppc_bars(y_int, yrep_int)
+ppc_rootogram(y_int, yrep_int)
+```
+
+
+### best model: fixed effects: treatment, site, site*treatment, logitPrevDay, random effects: Day, Genotype, Tank, Day
+```{r}
+##################################################################################################################
+#Model that makes the most sense and tests our hypotheses
+### using all the timepoints, and the logit-transformed value from the previous day as a predictor
+
+zoibTR_mod <- bf(propTissueRemaining ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay +  (1|Geno) + (1|Tank) + 
+                (1|Day),
+              phi ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              zoi ~1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              coi ~ 1  + trtNumeric + origin_site + trtNumeric*origin_site + logitPrevDay + (1|Geno) + (1|Tank) + 
+                (1|Day),
+              family =  zero_one_inflated_beta(link = "logit", link_phi = "log"))
+
+zoibTR_brm <- brm(zoibTR_mod,
+               data = TL_prevDayTR,
+               prior = zoibTR_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               init = "0",
+               warmup = n_warmup)
+
+saveRDS(zoibTR_brm, "model outputs/zoibTR_brm.RDS")
+zoibTR_brm<-readRDS("model outputs/zoibTR_brm.RDS")
+
+bayes_R2(zoibTR_brm) #.74
+pp_check(zoibTR_brm, type = "dens_overlay",ndraws = 100)
+#pp_check(zoibTR_brm, type = "loo_pit_overlay", ndraws = 100)
+#model_weights(zoibTL_brm6, zoibTR_brm) # This is better
+
+
+############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+y <- posterior_predict(zoibTR_brm)*100
+yrep_int <- sapply(data.frame(y), as.integer)
+y_int <- as.integer(TL_prevDayTR$propTissueRemaining*100)
+ppc_bars(y_int, yrep_int)
+ppc_rootogram(y_int, yrep_int)
+```
+
+
+## info for table
+
+```{r}
+describe_posterior(zoibTR_brm, ci = 0.65)
+describe_posterior(zoibTR_brm, ci = 0.95)
+```
+
+## Posterior plots
+```{r}
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_TR <- zoibTR_brm %>%
+ posterior_samples()%>%
+  dplyr::select(-contains(c('cor', 'phi', 'sd', 'lp', 'coi', 'zoi', 'Tank', 'Geno', 'Day', 'Intercept' ))) %>%
+  melt()%>%
+  as_tibble()
+colnames(posterior_draws_TL) <- c("effect", "effect_estimate")
+
+posterior_draws_TR %>%
+  ggplot(aes(x = effect_estimate, y = effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+  xlab("Posterior estimate")
+
+##-Get posterior draws for all parameter estimates-#
+posterior_draws_TR <- zoibTR_brm %>%
+ posterior_samples()%>%
+  dplyr::select(-contains(c('cor', 'phi', 'sd', 'lp', 'coi', 'zoi', 'Tank', 'Geno', 'Day', 'Intercept' ))) %>%
+  melt()%>%
+  as_tibble()
+colnames(posterior_draws_TR) <- c("effect", "effect_estimate")
+
+posterior_draws_TR %>%
+  ggplot(aes(x = effect_estimate, y = effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+  xlab("Posterior estimate")
+```
+
+# IV. Survivorship data
+
+```{r}
+# dataframe for plotting
+# % mortality by tank + day + Site + treatment
+propSurvTankSite<-TL %>%
+  group_by(Tank, DayID, origin_site, Treatment) %>%
+  mutate(dummy1 = 1,
+         numFrags = sum(dummy1),
+         mortality = ifelse(propTL>=0.95, 1, 
+                            ifelse(propTL<.95,0, NA))) %>%
+  summarise(propMort = sum(mortality)/numFrags)%>%
+  unique()%>%
+  mutate(propSurv=1-propMort)%>%
+  mutate(propSurv = ifelse(DayID=="1", 1, propSurv))
+
+```
+
+### Prop survivorship figures
+
+```{r}
+(survPlot_tank<- ggplot(data = propSurvTankSite, aes(x = DayID, y = propSurv)) + 
+    ylab("% survivorship") + 
+    xlab("Day") +
+  #geom_line(aes(color = Treatment, group = interaction(Tank)), size = 2, alpha = 0.65) +
+  geom_jitter(aes(color = Treatment)) +
+  geom_smooth(aes(color = Treatment, fill = Treatment, group = Treatment), method = 'lm')+ 
+  scale_fill_manual(values = plot.col.treat) + 
+  scale_color_manual(values = plot.col.treat) + 
+  facet_wrap(facets = vars(origin_site)) + 
+  coord_cartesian(ylim = c(0,1))+
+  mytheme)
+ggsave(file = "fig/SurvTankSitePlot.svg", plot = survPlot_tank, width = 7, height = 5)
+
+```
+
+## Survivorship models
+
+## fixed effects: treatment, random effects: Day
+```{r}
+
+#define model
+surv_mod <- bf(surv ~ 1  + trtNumeric  + (1 |Day) , 
+             family =  bernoulli(link = "logit"))
+
+##### Set priors
+surv_mean <- Surv %>%
+  dplyr::group_by(Day) %>%
+  dplyr::summarize(meanSurv = mean(surv)) %>%
+  mutate(logitmeanSurv = logit(meanSurv))
+
+print(paste("The logit-transformed surv intercept is", round(surv_mean[1,3], 2)))
+# 3.66
+
+surv_prior <- c(prior(normal(3.66, 1), class = "Intercept"),
+                prior(normal(0, 1), class = "b"),
+                prior(exponential(2), class = "sd"))
+                          
+# surv_brm <- brm(surv_mod,
+#                data = Surv,
+#                prior = surv_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# surv_brm
+# pp_check(surv_brm, type = "dens_overlay", ndraws = 100)
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(surv_brm)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(Surv$surv*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+
+
+# bayes_R2(surv_brm) #.07
+
+```
+
+## fixed effects: treatment, site, random effects: Day
+```{r}
+#define model
+surv_mod2 <- bf(surv ~ 1  + trtNumeric  + origin_site + (1 |Day) , 
+             family =  bernoulli(link = "logit"))
+                          
+# surv_brm2 <- brm(surv_mod2,
+#                data = Surv,
+#                prior = surv_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# surv_brm
+# pp_check(surv_brm2, type = "dens_overlay", ndraws = 100)
+# model_weights(surv_brm, surv_brm2) #THIS IS BETTER
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(surv_brm2)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(Surv$surv*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+# 
+# 
+# bayes_R2(surv_brm2) #.09
+
+```
+
+## fixed effects: treatment, site, random effects: Day, Geno
+```{r}
+#define model
+surv_mod3 <- bf(surv ~ 1  + trtNumeric  + origin_site + (1 |Day) + (1 |Geno), 
+             family =  bernoulli(link = "logit"))
+                          
+# surv_brm3 <- brm(surv_mod3,
+#                data = Surv,
+#                prior = surv_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# surv_brm
+# pp_check(surv_brm3, type = "dens_overlay", ndraws = 100)
+# model_weights(surv_brm3, surv_brm2) #THIS IS BETTER
+# 
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(surv_brm3)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(Surv$surv*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+# 
+# 
+# bayes_R2(surv_brm3) #.2
+
+```
+
+## fixed effects: treatment, site, random effects: Day, Geno, Tank
+```{r}
+#define model
+surv_mod4 <- bf(surv ~ 1  + trtNumeric  + origin_site + (1 |Day) + (1 |Geno)  + (1 |Tank), 
+             family =  bernoulli(link = "logit"))
+                          
+# surv_brm4 <- brm(surv_mod4,
+#                data = Surv,
+#                prior = surv_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# surv_brm
+# pp_check(surv_brm4, type = "dens_overlay", ndraws = 100)
+# model_weights(surv_brm3, surv_brm4) #THIS IS BETTER
+# 
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(surv_brm4)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(Surv$surv*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+# 
+# 
+# bayes_R2(surv_brm4) #.33
+
+```
+
+## fixed effects: treatment, site, random effects: Day, Geno,  treatment|tank
+```{r}
+#define model
+surv_mod5 <- bf(surv ~ 1  + trtNumeric  + origin_site + (1 |Day) + (1 |Geno)  + (1 +trtNumeric |Tank), 
+             family =  bernoulli(link = "logit"))
+                          
+# surv_brm5 <- brm(surv_mod5,
+#                data = Surv,
+#                prior = surv_prior,
+#                cores = n_cores,
+#                chains = n_chains,
+#                iter = n_iter,
+#                init = "0",
+#                warmup = n_warmup)
+# 
+# surv_brm
+# pp_check(surv_brm5, type = "dens_overlay", ndraws = 100)
+# model_weights(surv_brm5, surv_brm4) #THIS IS BETTER
+# 
+# ############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+# y <- posterior_predict(surv_brm5)*100
+# yrep_int <- sapply(data.frame(y), as.integer)
+# y_int <- as.integer(Surv$surv*100)
+# ppc_bars(y_int, yrep_int)
+# ppc_rootogram(y_int, yrep_int)
+# 
+# 
+# bayes_R2(surv_brm5) #.33
+
+```
+
+## best model: fixed effects: treatment, site, treatment*site, random effects: Day, Geno, Tank
+```{r}
+#define model
+surv_mod6 <- bf(surv ~ 1  + trtNumeric  + origin_site + trtNumeric*origin_site + (1 |Day) + (1 |Geno)  + (1 +trtNumeric |Tank), 
+             family =  bernoulli(link = "logit"))
+                          
+surv_brm6 <- brm(surv_mod6,
+               data = Surv,
+               prior = surv_prior,
+               cores = n_cores,
+               chains = n_chains,
+               iter = n_iter,
+               init = "0",
+               warmup = n_warmup)
+
+surv_brm
+pp_check(surv_brm6, type = "dens_overlay", ndraws = 100)
+model_weights(surv_brm5, surv_brm6) #THIS IS BETTER
+
+
+#saveRDS(surv_brm6, "model outputs/surv_brm6.RDS")
+surv_brm6<- readRDS("model outputs/surv_brm6.RDS")
+############ALTERNATIVE TO LOO PIT - LOOKS GOOD
+y <- posterior_predict(surv_brm6)*100
+yrep_int <- sapply(data.frame(y), as.integer)
+y_int <- as.integer(Surv$surv*100)
+ppc_bars(y_int, yrep_int)
+ppc_rootogram(y_int, yrep_int)
+
+
+bayes_R2(surv_brm6) #.39
+
+```
+
+
+## posterior plots
+
+```{r}
+#-Get posterior draws for all parameter estimates-#
+posterior_draws_mort <- mort_brm %>%
+ posterior_samples()%>%
+  dplyr::select(-contains(c( 'phi', 'sd', 'lp', 'Tank', 'Geno', 'Day', 'Intercept'))) %>%
+  melt()%>%
+  as_tibble()
+colnames(posterior_draws_mort) <- c("effect", "effect_estimate")
+
+posterior_draws_mort %>%
+  ggplot(aes(x = effect_estimate, y = effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate")
+#coord_cartesian(xlim = c(-0.1, 0.1)) 
+```
+
+
+## get info for table
+
+```{r}
+describe_posterior(surv_brm6, ci = 0.95)
+describe_posterior(surv_brm6, ci = 0.65)
+```
+
+
+# all posterior plots together
+
+```{r}
+pd_pam <- posterior_draws_pam%>%
+  mutate(response = "pam")
+
+pd_zoox <- posterior_draws_zoox%>%
+  mutate(response = "zoox")
+
+pd_TL <- posterior_draws_TL%>%
+  mutate(response = "TL")
+
+pd_TR <- posterior_draws_TR%>%
+  mutate(response = "TR")
+
+pd_surv <- posterior_draws_surv%>%
+  mutate(response = "surv")
+
+pd_physio <- pd_pam %>%
+  full_join(pd_zoox)%>%
+  full_join(pd_TR)%>%
+  full_join(pd_surv)%>%
+  mutate(Effect = paste0(effect, response))
+
+(pd_physio_DOtrt <- pd_physio %>%
+  filter(effect == "b_trtNumeric")%>%
+  ggplot(aes(x = effect_estimate, y = Effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate")+
+  theme(axis.text.y=element_blank())+
+  coord_cartesian(xlim = c(-.01,1))) 
+ggsave(file = "fig/pd_physio_DOtrt_noLabels.svg", plot = pd_physio_DOtrt, width = 7, height = 5)
+
+(pd_physio_all <- pd_physio %>%
+  #filter(effect == "b_trtNumeric")%>%
+  ggplot(aes(x = effect_estimate, y = Effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+     theme(axis.text.y=element_blank())+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate"))
+ggsave(file = "fig/pd_physio_all_noLabels.svg", plot = pd_physio_all, width = 7, height = 5)
+
+pd_physio_all
+
+(pd_physio_site <- pd_physio %>%
+  filter(effect == "b_origin_siteinshore")%>%
+  ggplot(aes(x = effect_estimate, y = Effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+     theme(axis.text.y=element_blank())+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate"))
+  #coord_cartesian(xlim = c(-.01,1.5))) 
+ggsave(file = "fig/pd_physio_site_noLabels.svg", plot = pd_physio_site, width = 7, height = 5)
+
+
+(pd_physio_siteDOinteract <- pd_physio %>%
+  filter(effect == "b_trtNumeric:origin_siteinshore")%>%
+  ggplot(aes(x = effect_estimate, y = Effect)) +
+  stat_halfeye()+
+  geom_vline(xintercept = 0, size = 1.5, linetype = "dashed") +
+  theme_bw(base_size = 16) +
+  ylab("") +
+  mytheme+
+     theme(axis.text.y=element_blank())+
+  #scale_fill_manual(plot.col.treat)+
+  xlab("Posterior estimate")+
+  coord_cartesian(xlim = c(-1.5,0.01))) 
+
+ggsave(file = "fig/pd_physio_siteDOinteract_noLabels.svg", plot = pd_physio_siteDOinteract, width = 7, height = 5)
+```
+
