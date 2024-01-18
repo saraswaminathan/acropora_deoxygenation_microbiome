@@ -16,40 +16,32 @@ Load libraries and set working directory
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(lubridate)
-library(zoo)
+library(readxl)
+#library(zoo)
 library(parallel)
 library(brms)
 library(reshape2)
 library(bayestestR)
 ```
 
-## Read in data and filter sites and partial days
+## Read in data and filter out partial days
 
 ```{r}
 # Load data frame
-YSIdata19 <- read.csv("data/sonde_data_withSeptNurseryMinidot.csv") %>%
-  dplyr::select(site, date, time, Depth, DOmgL, Sal_PSU, pH, Temp_degC, CHL_uGL, Turb_FNU, TDS_mgL) %>% #select columns we use
+YSIfiltered <- read_xlsx("data/sonde_data_withSeptNurseryMinidot.xlsx") %>%
   mutate(date = as.Date(date, format = '%m/%d/%y')) %>% # reformat date
-  filter(site %in% c("munson", "nursery"))%>%
-  mutate(site = factor(site, levels = c("nursery", "munson"))) %>%
-  mutate(DT = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M:%S")) %>% # make DateTime column
-  mutate(fulldays = factor(ifelse(date >= "2019-06-12" & date <= "2019-07-07", "JJ",
-                       ifelse(date >= "2019-07-10" & date <= "2019-08-04", "JA",
-                          ifelse(date >= "2019-08-07" & date <= "2019-09-08", "AS",
-                                  ifelse(date >= "2019-09-10" & date <= "2019-10-07", "SO", NA)))))) %>% #mark full days with deployment months, NA for partial days
+  mutate(time = as.character(gsub(".* ","",time)))%>%
+  mutate(site = as.factor(site)) %>% #make site a factor variable
+  mutate(DT = as.POSIXct(paste(date, time), format = "%Y-%m-%d %H:%M:%S")) %>% # make datetime column
+  mutate(fulldays = factor(ifelse(date >= "2019-06-12" & date <= "2019-07-07", "JJ", #june-july deployment dates
+                       ifelse(date >= "2019-07-10" & date <= "2019-08-04", "JA", #july-august deployment dates
+                          ifelse(date >= "2019-08-07" & date <= "2019-09-08", "AS", #august-september deployment dates
+                                  ifelse(date >= "2019-09-10" & date <= "2019-10-07", "SO", NA)))))) %>% #september-october deployment dates, NA for partial days
   mutate(fulldays = factor(fulldays, levels = c("JJ", "JA", "AS", "SO"))) %>%
-  arrange(site, DT)
-
-#filter to only sites where corals were collected for this experiment
-YSIfiltered <- YSIdata19 %>%
-  filter(site %in% c("munson", "nursery"))%>%
-  filter(!is.na(fulldays)) %>%
-  group_by(site) %>%
-  arrange(site, DT)
-
+  filter(!is.na(fulldays)) 
 ```
 
-# calculate rolling averages of DO, Turbidity, TDS, pH, and Salinity
+## calculate moving averages of Temp, DO, Turbidity, TDS, pH, and Salinity
 
 ```{r}
 YSI_ma <- YSIfiltered %>%
@@ -57,20 +49,20 @@ YSI_ma <- YSIfiltered %>%
   dplyr::arrange(DT, .by_group = TRUE) %>% #arrange by datetime and group by site
   mutate(maTemp_24 = rollmean(Temp_degC, k = 144, fill = NA),  # 24-hr temp running average (24 hrs * 60 min = 1440. Divided by measurements every 10 minutes.)
     maDO_24 = rollmean(DOmgL, k = 144, fill = NA),  # 24-hr DO running average
-    maTurb_24 = rollmean(Turb_FNU, k = 144, fill = NA),
-    maTDS_24 = rollmean(TDS_mgL, k = 144, fill = NA),
-    mapH_24 = rollmean(pH, k = 144, fill = NA),
-    maSal_24 = rollmean(Sal_PSU, k = 144, fill = NA))
+    maTurb_24 = rollmean(Turb_FNU, k = 144, fill = NA), # 24-hr Turbidity running average
+    maTDS_24 = rollmean(TDS_mgL, k = 144, fill = NA), # 24-hr TDS running average
+    mapH_24 = rollmean(pH, k = 144, fill = NA), # 24-hr pH running average
+    maSal_24 = rollmean(Sal_PSU, k = 144, fill = NA)) # 24-hr Salinity running average
 
-# filter to munson (inshore) alone
+# separate dataframe for munson (inshore) data
 ma_munson <- YSI_ma %>%
   filter(site == "munson") 
 
-# filter to nursery (offshore) alone
+# separate dataframe for nursery (offshore) data
 ma_nursery <- YSI_ma %>%
   filter(site == "nursery")
 
-# summarize moving average df with mins and max values
+# summarize moving average df with min and max values
 ysiSumm <- YSI_ma %>%
   group_by(site, date)%>%
   mutate(DOmax = max(DOmgL), 
@@ -92,10 +84,6 @@ ysiSumm <- YSI_ma %>%
             TDSMin = min(TDS_mgL), 
             TDSMean = mean(TDS_mgL))
 
-# find all instances of DO less than 4mg/L
-lowDO<-YSI_ma%>%
-  filter(DOmgL<4)
-
 # subset to temp data
 YSI_ma_temp<- YSI_ma %>%
   mutate(datetime_index = as.numeric(DT))%>%
@@ -114,28 +102,35 @@ YSI_ma_do<- YSI_ma %>%
   summarise(DOmgL = mean(DOmgL))
 ```
 
-# set plotting colors 
-```{r}
-siteColorsPoint = c("munson" = "#f4a582", "nursery" = "#abd9e9")
-siteColorsLine = c("munson" = "#d7191c", "nursery" = "#2c7bb6")
-```
+# Summary stats
 
-## calculate days Munson average temp > 31 deg (50days)
+## Munson (inshore)
 ```{r}
+#calculate mean temp +/- SE
+ma_munson%>%
+  filter(!is.na(maTemp_24)) %>%
+  summarise(N = n_distinct(date),
+            mean = mean(maTemp_24),
+            SD = sd(maTemp_24),
+            SE = SD/sqrt(N))
+
+# Calculate number of days where daily mean was greater than 31 degrees C at munson
 ma_munson%>%
   ungroup()%>%
   dplyr::group_by(date)%>%
   summarise(dailyMean = mean(maTemp_24))%>%
   filter(dailyMean > 31)
 
+#calculate mean DO +/- SE
 ma_munson%>%
   summarise(N = n_distinct(date),
             mean = mean(DOmgL),
             SD = sd(DOmgL),
             SE = SD/sqrt(N))
 
+# find number of instances of DO less than 4mg/L at munson
 ma_munson%>%
-  summarise(mean = mean(Temp_degC))
+  filter(DOmgL<4)
 
 
 rangeMunson <- ma_munson%>%
@@ -144,25 +139,39 @@ rangeMunson <- ma_munson%>%
     min = min(Temp_degC), 
             max = max(Temp_degC),
             range = max - min)%>%
-  mutate(SD = sd(range), 
+  mutate(meanRange = mean(range),
+    SD = sd(range), 
     SE = SD/sqrt(N))
 ```
 
-## calculate days Nursery average > 31 deg (14)
+## Nursery (offshore)
 ```{r}
+#calculate mean temp +/- SE
 ma_nursery%>%
-  group_by(date)%>%
+  filter(!is.na(maTemp_24)) %>%
+  summarise(N = n_distinct(date),
+            mean = mean(maTemp_24),
+            SD = sd(maTemp_24),
+            SE = SD/sqrt(N))
+
+# Calculate number of days where daily mean was greater than 31 degrees C at munson
+ma_nursery%>%
+  ungroup()%>%
+  dplyr::group_by(date)%>%
   summarise(dailyMean = mean(maTemp_24))%>%
   filter(dailyMean > 31)
 
-ma_nursery%>%
-  summarise(mean = mean(Temp_degC))
-
+#calculate mean DO +/- SE
 ma_nursery%>%
   summarise(N = n_distinct(date),
             mean = mean(DOmgL),
             SD = sd(DOmgL),
             SE = SD/sqrt(N))
+
+# find number of instances of DO less than 4mg/L at munson
+ma_nursery%>%
+  filter(DOmgL<4)
+
 
 rangeNursery <- ma_nursery%>%
   group_by(date) %>%
@@ -170,58 +179,21 @@ rangeNursery <- ma_nursery%>%
     min = min(Temp_degC), 
             max = max(Temp_degC),
             range = max - min)%>%
-  mutate(SD = sd(range), 
+  mutate(meanRange = mean(range),
+    SD = sd(range), 
     SE = SD/sqrt(N))
-
-
 ```
 
-## calculate mean diel fluctuation at each site
+# Plotting
+
+## set plotting colors for figures
 ```{r}
-YSI_ma %>%
-  select(date, site, Temp_degC)%>%
-  group_by(date, site)%>%
-  summarise(min = min(Temp_degC), 
-         max = max(Temp_degC),
-         diel = max - min)%>%
-  ungroup()%>%
-  group_by(site)%>%
-  summarise(meanDiel = mean(diel))
+siteColorsPoint = c("munson" = "#f4a582", "nursery" = "#abd9e9")
+siteColorsLine = c("munson" = "#d7191c", "nursery" = "#2c7bb6")
 ```
 
-# Temperature plot
-
-## with points
-```{r}
-# Plot 24-running average over raw
-bothSitesTempplot <- ggplot(data = YSI_ma, aes(x = DT)) +
-  geom_point(aes(y = Temp_degC, fill = site), size = 1, shape = 21, alpha = 0.3, stroke = 0) +
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  geom_line(aes (y = maTemp_24, color = site), size = 1) +
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(title = "Summer 2019 temperatures at inshore and offshore sites",  
-       #subtitle = "2019",
-       x = "\nDate", # \n makes space above and below
-       y = "Temp (\u00B0C)\n") +
-  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(27.5,33),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
-    breaks = seq(27.5,33,1)) +  # Defines breaks in a sequence from 3 to 9.5 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-06-12", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c("12 Jun", "1 Jul", "1 Aug", "1 Sep", "1 Oct")) +
-  theme(axis.text.x = element_text(size = 10),
-        axis.text.y = element_text(size = 10))
-# minor_breaks = as.POSIXct(c("2019-06-01", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")) 
-bothSitesTempplot # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/TempbothSites2019.pdf", plot = bothSitesTempplot, width = 8, height = 6)
-ggsave(file = "fig/TempbothSites2019.svg", plot = bothSitesTempplot, width = 8, height = 6)
-```
-
-## with geom ribbon
+##Figure 1B - Temperature
+### both sites, with geom ribbon
 
 ```{r}
 # Plot 24-running average over raw
@@ -253,41 +225,8 @@ ggsave(file = "fig/bothSitesTemp_simp.svg", plot = bothSitesTemp_simp, width = 8
 ggsave(file = "fig/bothSitesTemp_simp.pdf", plot = bothSitesTemp_simp, width = 8, height = 6)
 ```
 
-# DO plot
-## with points
-
-```{r}
-# Plot 24-running average over raw
-bothSitesDOplot <- ggplot(data = YSI_ma, aes(x = DT)) +
-  geom_point(aes(y = DOmgL, fill = site), size = 1, shape = 21, alpha = 0.3, stroke = 0) +
-  geom_line(aes (y = maDO_24, color = site), size = 1) + 
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(title = "Site DO differences",  
-       #subtitle = "2019",
-       x = "\nDate", # \n makes space above and below
-       y = "DO mg/L") +
-  scale_y_continuous(#expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(3,8),  # Sets the y-axis to range from 3 to 9.5, based on the site with the widest range
-    breaks = seq(3,8,1)) +  # Defines breaks in a sequence from 3 to 9.5 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-06-12", "2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c("12 Jun", "1 Jul", "1 Aug", "1 Sep", "1 Oct")) +
-  theme(axis.text.x = element_text(size = 15),
-        axis.text.y = element_text(size = 15)) + 
-  theme(text=element_text(size=15)) + 
-  theme(legend.position="none")
-  
-bothSitesDOplot # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/DObothSites_bothSegments.pdf", plot = bothSitesDOplot, width = 8, height = 6)
-ggsave(file = "fig/DObothSites_bothSegments.svg", plot = bothSitesDOplot, width = 8, height = 6)
-```
-
-## with geom ribbon
+##Figure 1B - DO
+### both sites, with geom ribbon
 
 ```{r}
 # Plot 24-running average over raw
@@ -317,6 +256,96 @@ bothSitesDO_simp # Print plot
 ggsave(file = "fig/bothSitesDO_simp.svg", plot = bothSitesDO_simp, width = 8, height = 6)
 ggsave(file = "fig/bothSitesDO_simp.pdf", plot = bothSitesDO_simp, width = 8, height = 6)
 ``` 
+# Turbidity, pH, Salinity, and and TDS plots
+
+```{r}
+# comparison plot of TDS and Salinity requested by editor
+(tds_sal_compare<- ggplot(data = ysiSumm, aes(x = maTDS_24, y = maSal_24, color = site))+
+  scale_color_manual(values=siteColorsLine) +
+  geom_point(alpha = 0.01))
+ggsave(file = "fig/tds_sal_compare.pdf", plot = tds_sal_compare, width = 8, height = 6)
+
+# Plot 24-running average TDS over raw
+(bothSitesTDS_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = TDSMin, ymax = TDSMax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maTDS_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "TDS") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(34000,37000))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+
+### save plot to file (svg)
+ggsave(file = "fig/bothSitesTDS_simp.svg", plot = bothSitesTDS_simp, width = 8, height = 6)
+
+### save plot to file (pdf)
+ggsave(file = "fig/bothSitesTDS_simp.pdf", plot = bothSitesTDS_simp, width = 8, height = 6)
+
+# Plot 24-running average pH over raw
+(bothSitespH_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = pHmin, ymax = pHmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = mapH_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "pH") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(7.9,8.4))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+
+### save plot to file (svg)
+ggsave(file = "fig/bothSitespH_simp.svg", plot = bothSitespH_simp, width = 8, height = 6)
+
+### save plot to file (pdf)
+ggsave(file = "fig/bothSitespH_simp.pdf", plot = bothSitespH_simp, width = 8, height = 6)
+
+# Plot 24-running average Salinity over raw
+(bothSitesSal_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
+  geom_ribbon(aes(ymin = Sal_PSUmin, ymax = Sal_PSUmax, alpha = 0.5), color = NA)+
+  geom_line(aes (y = maSal_24, color = site), size = 1) + 
+  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
+  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
+  theme_bw()+
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  labs(color = "") +
+  labs(x = "\nDate", # \n makes space above and below
+       y = "Salinity (psu)") +
+scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
+    limits = c(34,38))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
+ #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
+  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
+                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
+  theme(axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15)) + 
+  theme(text=element_text(size=15)) + 
+  theme(legend.position="none"))
+
+### save plot to file (svg)
+ggsave(file = "fig/bothSitesSal_simp.svg", plot = bothSitesSal_simp, width = 8, height = 6)
+
+### save plot to file (pdf)
+ggsave(file = "fig/bothSitesSal_simp.pdf", plot = bothSitesSal_simp, width = 8, height = 6)
+```
 
 # Bayesian models of environmental data
 
@@ -329,11 +358,13 @@ n_iter <- 4000
 n_warmup <- 2000
 ```
 
-# temperature models - temp_brm5 is the best model
+## Temperature models
+- temp_brm5 is the best model
+- uncomment to run models
 
 ```{r}
 hist(YSI_ma$maTemp_24) # visualize data
-hist(log(YSI_ma$maTemp_24)) # visualize data
+hist(log(YSI_ma$maTemp_24)) # visualize data (log-transformed)
 ########################################################################################################################################
 
 #define model
@@ -393,7 +424,7 @@ temp_prior<- c(prior(normal(0, 5), class = "Intercept"),
 # bayes_R2(temp_brm2) #0.78
 
 # ###########################################################################################################################################
-# trying as a mixture model - did not converge at all
+# trying as a mixture model - did not converge 
 ##### Set priors
 
 # #define model
@@ -513,6 +544,11 @@ temp_mod7 <- bf(Temp_degC ~  site + s(datetime_index, by = site, id = 1, k=30) ,
 # temp_brm5
 # model_weights(temp_brm5, temp_brm7)# 5 is better
 ############################################################################################################################################
+
+
+
+
+
 # get credible intervals of best model
 #-Get posterior draws for all parameter estimates-#
 posterior_draws_temp <- temp_brm5 %>%
@@ -525,7 +561,9 @@ describe_posterior(temp_brm5, ci = 0.95)
 bayes_R2(temp_brm5)
 ```
 
-# DO models - do_brm6 is the best model
+## DO models 
+- do_brm6 is the best model
+- uncomment to run models
 
 ```{r}
 hist(YSI_ma$maDO_24)
@@ -700,149 +738,3 @@ describe_posterior(do_brm6, ci = 0.95)
 bayes_R2(do_brm6)
 ############################################################################################################################################
 ```
-
-
-# Turbidity, pH, Salinity, and and TDS plots
-
-```{r}
-
-ysiSumm%>%
-  group_by(site)%>%
-  na.omit()%>%
-  summarize(meanSal = mean(maSal_24))
-
-ysiSumm%>%
-  group_by(site)%>%
-  na.omit()%>%
-  summarize(meanTDS = mean(maTDS_24))
-
-ysiSumm%>%
-  group_by(site)%>%
-  na.omit()%>%
-  summarize(meanTurb = mean(maTurb_24))
-
-ysiSumm%>%
-  group_by(site)%>%
-  na.omit()%>%
-  summarize(meanpH = mean(mapH_24))
-
-tds_sal_compare<- ggplot(data = ysiSumm, aes(x = maTDS_24, y = maSal_24, color = site))+
-  scale_color_manual(values=siteColorsLine) +
-  geom_point(alpha = 0.01)
-ggsave(file = "fig/tds_sal_compare.pdf", plot = tds_sal_compare, width = 8, height = 6)
-
-# Plot 24-running average TURBIDITY over raw
-(bothSitesTurb_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
-  geom_ribbon(aes(ymin = Turbmin, ymax = Turbmax, alpha = 0.5), color = NA)+
-  geom_line(aes (y = maTurb_24, color = site), size = 1) + 
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(x = "\nDate", # \n makes space above and below
-       y = "Turbidity") +
-scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(-2,10))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
- #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
-  theme(axis.text.x = element_text(size = 15),
-        axis.text.y = element_text(size = 15)) + 
-  theme(text=element_text(size=15)) + 
-  theme(legend.position="none"))
- 
-bothSitesTurb_simp # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/bothSitesTurb_simp.svg", plot = bothSitesTurb_simp, width = 8, height = 6)
-
-ggsave(file = "fig/bothSitesTurb_simp.pdf", plot = bothSitesTurb_simp, width = 8, height = 6)
-
-
-# Plot 24-running average TDS over raw
-(bothSitesTDS_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
-  geom_ribbon(aes(ymin = TDSMin, ymax = TDSMax, alpha = 0.5), color = NA)+
-  geom_line(aes (y = maTDS_24, color = site), size = 1) + 
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(x = "\nDate", # \n makes space above and below
-       y = "TDS") +
-scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(34000,37000))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
- #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
-  theme(axis.text.x = element_text(size = 15),
-        axis.text.y = element_text(size = 15)) + 
-  theme(text=element_text(size=15)) + 
-  theme(legend.position="none"))
- 
-bothSitesTDS_simp # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/bothSitesTDS_simp.svg", plot = bothSitesTDS_simp, width = 8, height = 6)
-
-ggsave(file = "fig/bothSitesTDS_simp.pdf", plot = bothSitesTDS_simp, width = 8, height = 6)
-
-# Plot 24-running average pH over raw
-(bothSitespH_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
-  geom_ribbon(aes(ymin = pHmin, ymax = pHmax, alpha = 0.5), color = NA)+
-  geom_line(aes (y = mapH_24, color = site), size = 1) + 
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(x = "\nDate", # \n makes space above and below
-       y = "pH") +
-scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(7.9,8.4))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
- #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
-  theme(axis.text.x = element_text(size = 15),
-        axis.text.y = element_text(size = 15)) + 
-  theme(text=element_text(size=15)) + 
-  theme(legend.position="none"))
- 
-bothSitespH_simp # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/bothSitespH_simp.svg", plot = bothSitespH_simp, width = 8, height = 6)
-
-ggsave(file = "fig/bothSitespH_simp.pdf", plot = bothSitespH_simp, width = 8, height = 6)
-
-
-# Plot 24-running average Salinity over raw
-(bothSitesSal_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +
-  geom_ribbon(aes(ymin = Sal_PSUmin, ymax = Sal_PSUmax, alpha = 0.5), color = NA)+
-  geom_line(aes (y = maSal_24, color = site), size = 1) + 
-  scale_color_manual(values=siteColorsLine) + # Manually change colors of plotted data
-  scale_fill_manual(values=siteColorsPoint) + # Manually change colors of plotted data
-  theme_bw()+
-  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
-  labs(color = "") +
-  labs(x = "\nDate", # \n makes space above and below
-       y = "Salinity (psu)") +
-scale_y_continuous(expand = c(0,0),   # # Sets the 0 of the y-axis to start at the plot outline and not have it floating above the plot
-    limits = c(34,38))+  # Sets the y-axis to range from 0 to 10, based on the site with the widest range
- #   breaks = seq(0,10,1)) +  # Defines breaks in a sequence from 27.5 to 33 by increments of 1
-  scale_x_datetime(breaks = as.POSIXct(c("2019-07-01", "2019-08-01", "2019-09-01", "2019-10-01")),
-                   labels = c( "1-Jul", "1-Aug", "1-Sep", "1-Oct")) +
-  theme(axis.text.x = element_text(size = 15),
-        axis.text.y = element_text(size = 15)) + 
-  theme(text=element_text(size=15)) + 
-  theme(legend.position="none"))
- 
-bothSitesSal_simp # Print plot
-
-### save plot with specified parameters directly to a specific file path
-ggsave(file = "fig/bothSitesSal_simp.svg", plot = bothSitesSal_simp, width = 8, height = 6)
-
-ggsave(file = "fig/bothSitesSal_simp.pdf", plot = bothSitesSal_simp, width = 8, height = 6)
-```
-
