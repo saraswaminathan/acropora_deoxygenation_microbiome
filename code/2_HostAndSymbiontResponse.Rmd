@@ -420,7 +420,8 @@ colnames(posterior_draws_pam) <- c("effect", "effect_estimate")
 
 ## getting info for table
 ```{r}
-pamTable<- describe_posterior(pamDawn_brm6, ci = 0.65)
+describe_posterior(pamDawn_brm6, ci = 0.65)
+pamDawn_brm6
 describe_posterior(pamDawn_brm6, ci = 0.95)
 pamTable
 ```
@@ -609,7 +610,7 @@ pp_check(zoox_brm5, ndraws = 100)
 pp_check(zoox_brm5, type = "loo_pit_overlay", ndraws = 100) # USE THE PCC ONE INSTEAD
 
 #model_weights(zoox_brm5, zoox_brm4, weights = "WAIC") # better when treatment varies by genotype
-bayes_R2(zoox_brm15) #0.25
+bayes_R2(zoox_brm5) #0.25
 ```
 
 
@@ -644,7 +645,8 @@ ggsave(file = "fig/posterior_draws_zoox_plot.svg", plot = posterior_draws_zoox_p
 ## get info for table
 
 ```{r}
-zooxTable<- describe_posterior(zoox_brm5, ci = .65)
+zoox_brm5
+describe_posterior(zoox_brm5, ci = .65)
 describe_posterior(zoox_brm5, ci = .95)
 zooxTable
 ```

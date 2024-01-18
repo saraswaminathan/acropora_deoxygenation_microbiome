@@ -129,7 +129,23 @@ ma_munson%>%
   filter(dailyMean > 31)
 
 ma_munson%>%
+  summarise(N = n_distinct(date),
+            mean = mean(DOmgL),
+            SD = sd(DOmgL),
+            SE = SD/sqrt(N))
+
+ma_munson%>%
   summarise(mean = mean(Temp_degC))
+
+
+rangeMunson <- ma_munson%>%
+  group_by(date) %>%
+  summarise(N = n_distinct(date),
+    min = min(Temp_degC), 
+            max = max(Temp_degC),
+            range = max - min)%>%
+  mutate(SD = sd(range), 
+    SE = SD/sqrt(N))
 ```
 
 ## calculate days Nursery average > 31 deg (14)
@@ -141,6 +157,23 @@ ma_nursery%>%
 
 ma_nursery%>%
   summarise(mean = mean(Temp_degC))
+
+ma_nursery%>%
+  summarise(N = n_distinct(date),
+            mean = mean(DOmgL),
+            SD = sd(DOmgL),
+            SE = SD/sqrt(N))
+
+rangeNursery <- ma_nursery%>%
+  group_by(date) %>%
+  summarise(N = n_distinct(date),
+    min = min(Temp_degC), 
+            max = max(Temp_degC),
+            range = max - min)%>%
+  mutate(SD = sd(range), 
+    SE = SD/sqrt(N))
+
+
 ```
 
 ## calculate mean diel fluctuation at each site
@@ -693,6 +726,10 @@ ysiSumm%>%
   na.omit()%>%
   summarize(meanpH = mean(mapH_24))
 
+tds_sal_compare<- ggplot(data = ysiSumm, aes(x = maTDS_24, y = maSal_24, color = site))+
+  scale_color_manual(values=siteColorsLine) +
+  geom_point(alpha = 0.01)
+ggsave(file = "fig/tds_sal_compare.pdf", plot = tds_sal_compare, width = 8, height = 6)
 
 # Plot 24-running average TURBIDITY over raw
 (bothSitesTurb_simp <- ggplot(data = ysiSumm, aes(x = DT, color = site, fill = site)) +

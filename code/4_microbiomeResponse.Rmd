@@ -877,6 +877,13 @@ core_data <- data%>%
   #filter(treatment=="0")%>%
   pivot_longer(cols = `ASV1:Alteromonadaceae`:`ASV9:Oceanospirillum`, names_to = "Taxa", values_to = "relativeAbundance")
 
+### calculate mean and SE relative abundance for each taxa group
+core_data_summary <- core_data %>% 
+  dplyr::group_by(Taxa, treatment)%>% 
+  dplyr::mutate(taxaMean = mean(relativeAbundance), 
+                N = length(SampleID),
+                taxaSE = sd(relativeAbundance)/sqrt(N))
+
 breaks <- c(0, 0.1, 0.2, 0.3, 0.4)
 
 # Plot using ggplot
