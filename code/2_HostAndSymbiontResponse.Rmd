@@ -22,6 +22,9 @@ library(bayestestR)       # Load 'bayestestR' for Bayesian hypothesis tests
 library(tidybayes)        # Load 'tidybayes' for tidy data handling in Bayesian analyses
 library(reshape)          # Load 'reshape' for reshaping and transforming data
 
+# Set the root directory for knitr to the project root in an RStudio project.
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+
 #-Write logit function to logit-transform data-#
 logit <- function(mu){
   logit.mu <- log(mu/(1-mu))
@@ -43,6 +46,15 @@ mytheme <- theme_classic() +                                                   #
 
 #-Set color palette -#
 plot.col.treat<-c("0.5" = "#F18D34", "2" = "#F5C75D", "4" =  "#E5EF99", "6" =  "#A5DEDE") # Set colors corresponding to each DO treatment
+```
+
+# Set instructions for sampler
+
+```{r}
+n_cores <- detectCores() # Detect the number of available CPU cores
+n_chains <- 2            # Set the number of chains for the sampler to run in parallel
+n_iter <- 4000           # Set the total number of iterations for each chain in the sampler
+n_warmup <- 2000         # Set the number of warm-up iterations, which are discarded before collecting samples
 ```
 
 # Read in coral data and format
@@ -262,11 +274,6 @@ pamDawn_prior <- c(prior(normal(0.77, 1), class = "Intercept"),
 #-Save the best/final model-#
 #saveRDS(pamDawn_brm_Phi6, "model outputs/pamDawn_brm_Phi6.RDS")
 pamDawn_brm_Phi6 <- readRDS("model outputs/pamDawn_brm_Phi6.RDS")
-
-#-Get credible intervals of best/final model-#
-pamDawn_brm_Phi6
-describe_posterior(pamDawn_brm_Phi6, ci = 0.65)
-describe_posterior(pamDawn_brm_Phi6, ci = 0.95)
 
 #-Model comparison using using WAIC and loo scores-#
 # model_weights(pamDawn_brm_Phi, pamDawn_brm_Phi2, pamDawn_brm_Phi3, weights = "loo") #compare all models where day is continuous - 3 is best (no site or interaction)

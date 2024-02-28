@@ -18,6 +18,9 @@ library(parallel)   # Parallel computing
 library(brms)       # Bayesian regression models
 library(reshape2)   # Data manipulation
 library(bayestestR) # Tools for Bayesian model checking and comparisons
+
+# Set the root directory for knitr to the project root in an RStudio project.
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
 ```
 
 # Read in and format YSI data
