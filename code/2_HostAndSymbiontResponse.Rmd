@@ -12,20 +12,15 @@ number_sections: true
 
 ```{r setup}
 #-Load necessary libraries-#
-#library(rcompanion)      # Load 'rcompanion' for statistical functions and data visualization
 library(car)              # Load 'car' for statistical tools and data visualization
 library(readxl)           # Load 'readxl' for reading Excel files
 library(splitstackshape)  # Load 'splitstackshape' for data splitting, stacking, and reshaping
-#library(lubridate)       # Load 'lubridate' for handling date and time data
 library(tidyverse)        # Load 'tidyverse' for data manipulation and visualization
 library(brms)             # Load 'brms' for Bayesian regression modeling
 library(parallel)         # Load 'parallel' for parallel computing
-#library(ggmcmc)          # Load 'ggmcmc' for graphical tools in Bayesian analysis
 library(bayestestR)       # Load 'bayestestR' for Bayesian hypothesis tests
 library(tidybayes)        # Load 'tidybayes' for tidy data handling in Bayesian analyses
 library(reshape)          # Load 'reshape' for reshaping and transforming data
-#library(bayesplot)       # Load 'bayesplot' for creating plots in Bayesian analyses
-
 
 #-Write logit function to logit-transform data-#
 logit <- function(mu){

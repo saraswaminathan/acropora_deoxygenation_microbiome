@@ -1,3 +1,5 @@
+#-Install packages-#
+
 #BiocManager::install("dada2", version = "3.16")
 library(dada2)
 library(ggplot2)
@@ -5,20 +7,21 @@ library(phyloseq)
 library(vegan)
 library(tidyverse)
 
-#Path below is for raw files of kept runs only
-path <- "data/sequences"
-list.files(path)
-# Forward and reverse fastq filenames have format: SAMPLENAME_R1_cut.fastq.gz and SAMPLENAME_R2_cut.fastq.gz
-# Samplename is everything before the first underscore
-fnFs <- sort(list.files(path, pattern="_L001_R1_cut.fastq", full.names = TRUE))
-fnRs <- sort(list.files(path, pattern="_L001_R2_cut.fastq", full.names = TRUE))
-# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
-sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1) #only needs to be done for Forwards
 
+path <- "data/sequences" # Set path to raw sequences
+list.files(path) # list files in directory
+
+fnFs <- sort(list.files(path, pattern="_L001_R1_cut.fastq", full.names = TRUE)) # Assign object to forward read sequences
+fnRs <- sort(list.files(path, pattern="_L001_R2_cut.fastq", full.names = TRUE)) # Assign object to reverse read sequences
+
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+#Plot quality profiles
 plotQualityProfile(fnFs[1:8], aggregate = TRUE)
 plotQualityProfile(fnRs[9:12], aggregate = TRUE) 
 
-# Perform filtering and trimming
+#-Perform filtering and trimming-#
 # Assign the filenames for the filtered fastq.gz files.
 # Make directory and filenames for the filtered fastqs
 filt_path <- file.path(path, "filtered") # Create a "filtered" subdirectory
